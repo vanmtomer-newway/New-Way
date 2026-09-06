@@ -29,9 +29,16 @@ BUY_BOX = ["46236", "46217", "46228", "46224", "46229", "46237", "46219", "46107
 # הסימון WATCH הקודם נשען על $/sqft של Redfin ברמת זיפ — תמהיל, לא שוק.
 NORTH = ["46220", "46205", "46260", "46240"]
 TARGET = BUY_BOX + NORTH                 # ברירת המחדל של כל הכלים
-RULE = 0.72   # כלל ההצעה: הצעה ≤ RULE×ARV − שיפוץ. 70% מכויל לקונה ממונף (מימון ~5.4% מה-ARV);
-              # במזומן חוזרות 2 נקודות ולא יותר — 12.6% שגיאת ARV צריכה את השאר. decisions.md 6.9.2026
+# כלל ההצעה לפי שכבה: הצעה ≤ RULE×ARV − שיפוץ. 70% מכויל לקונה ממונף (מימון ~5.4% מה-ARV);
+# במזומן חוזרות 2 נקודות ב-BUY BOX. בצפון שגיאת ה-ARV היא 18.7% (מול 12.4%) ⇒ 69% נותן
+# את אותה כרית של ~$15K בתרחיש התחתון. decisions.md 6.9.2026
+RULES = {"BUY": 0.72, "NORTH": 0.69}
 MARION_COUNTY_ID = "49"
+
+
+def rule_for(zip5):
+    """מחוץ ל-BUY BOX — הכלל השמרני של הצפון."""
+    return RULES["BUY"] if zip5 in BUY_BOX else RULES["NORTH"]
 YEARS = list(range(2023, date.today().year + 1))   # מהלוח: בינואר נוספת שנה לבד
 FLIP_MAX_MONTHS = 18        # שתי מכירות רחוקות מזה — כבר לא פליפ
 FLIP_MIN_GAIN = 0.10        # עלייה מתחת לזה היא שוק, לא שיפוץ
@@ -404,7 +411,8 @@ def selftest():
     assert _norm_name(None) == "" and _norm_name("EQUITY TRUST CO") == "EQUITY TRUST"
     assert _norm_name("HPMC Real Estate LLC, an Indiana limited liability company") == "HPMC REAL ESTATE"
     assert _norm_name("A Plus LLC") == "A PLUS"
-    assert len(TARGET) == 12 and set(NORTH) & set(BUY_BOX) == set() and 0.70 <= RULE <= 0.75
+    assert len(TARGET) == 12 and set(NORTH) & set(BUY_BOX) == set()
+    assert rule_for("46236") == 0.72 and rule_for("46220") == 0.69 and rule_for("99999") == RULES["NORTH"]
     # בנייה חדשה אינה פליפ: מגרש -> בית, או בית שסומן D1 (physical change) במכירה
     assert not find_flips([
         {**base, "parcel": "D", "date": "2025-01-10", "price": 60_000, "class": "500", "improved": False},

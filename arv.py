@@ -40,7 +40,6 @@ def err_for(zip5):
     return ERR["BUY"] if zip5 in sdf.BUY_BOX else ERR["NORTH"]
 
 # ── פ"ל של עסקת מזומן. מקור: `CLAUDE.md` § "העסקה לדוגמה — 46236 Geist" ──
-RULE          = sdf.RULE  # כלל ההצעה (72% — ראה sdf.py)
 LOG           = os.path.join(os.path.dirname(os.path.abspath(__file__)), "underwriting_log.csv")
 BUY_CLOSE     = 3_865     # טייטל $2,000 + בדיקה $900 + רישום $65 + היתרים $900. קבוע, לא אחוז (Excel B20:B23)
 EXIT_PCT      = 0.0825    # 8.25% מה-ARV — תיווך + הטבות + סגירה
@@ -112,13 +111,14 @@ def arv_band(comps, zip5=""):
     }
 
 
-def deal(arv, offer, reno=RENO_DEFAULT, months=MONTHS_DEFAULT):
-    """פ"ל של עסקת מזומן. אין ריבית, אין נקודות, אין שעון מלווה."""
+def deal(arv, offer, reno=RENO_DEFAULT, months=MONTHS_DEFAULT, zip5=""):
+    """פ"ל של עסקת מזומן. אין ריבית, אין נקודות, אין שעון מלווה. הכלל לפי שכבת הזיפ."""
     basis = offer + BUY_CLOSE + reno + months * HOLD_MONTH
     exit_costs = arv * EXIT_PCT
     profit = arv - exit_costs - basis
+    rule = sdf.rule_for(zip5)
     return {"arv": arv, "basis": basis, "exit": exit_costs, "profit": profit,
-            "roc": profit / basis, "offer_rule": RULE * arv - reno}
+            "roc": profit / basis, "rule": rule, "offer_rule": rule * arv - reno}
 
 
 # ─────────────────────────── פקודות ───────────────────────────
@@ -182,22 +182,23 @@ def cmd_deal(sales, loc, args):
     print(f"\n▌ {subj['address']}  ·  {subj['zip']}")
     _print_band(b)
 
+    rule = sdf.rule_for(subj["zip"])
     if offer is None:
-        offer = RULE * b["arv"] - reno
-        print(f"\nלא ניתנה הצעה — משתמש בכלל ה-{RULE:.0%} על האומדן: ${offer:,.0f}")
+        offer = rule * b["arv"] - reno
+        print(f"\nלא ניתנה הצעה — משתמש בכלל ה-{rule:.0%} על האומדן: ${offer:,.0f}")
     print(f"\n{'─'*66}\nטווח הרווח — מזומן מלא · שיפוץ ${reno:,.0f} ({how}) · {months} ח' החזקה")
     print(f"הצעה ${offer:,.0f}\n")
-    print(f"{'תרחיש ARV':<22}{'ARV':>11}{'בסיס':>11}{'רווח':>11}{'על העלות':>11}{format(RULE, '.0%') + ' מתיר':>11}")
+    print(f"{'תרחיש ARV':<22}{'ARV':>11}{'בסיס':>11}{'רווח':>11}{'על העלות':>11}{format(rule, '.0%') + ' מתיר':>11}")
     for lbl, arv in ((f"p90 שלילי  −{b['p90']:.1%}", b["worst"]), (f"תחתון  −{b['p50']:.1%}", b["low"]),
                      ("אומדן", b["arv"]), (f"עליון  +{b['p50']:.1%}", b["high"])):
-        d = deal(arv, offer, reno, months)
+        d = deal(arv, offer, reno, months, subj["zip"])
         flag = "" if d["profit"] > 0 else "  ❌"
         print(f"{lbl:<22}{d['arv']:>11,.0f}{d['basis']:>11,.0f}"
               f"{d['profit']:>11,.0f}{d['roc']:>10.1%}{d['offer_rule']:>11,.0f}{flag}")
-    d = deal(b["low"], offer, reno, months)
+    d = deal(b["low"], offer, reno, months, subj["zip"])
     print(f"\n👉 בתרחיש התחתון הרווח הוא ${d['profit']:,.0f}. "
           f"{'זו העסקה.' if d['profit'] > 0 else '🔴 העסקה מפסידה בתרחיש התחתון.'}")
-    _log(subj, b, offer, reno, how, months, d, deal(b["arv"], offer, reno, months))
+    _log(subj, b, offer, reno, how, months, d, deal(b["arv"], offer, reno, months, subj["zip"]))
 
 
 def _log(subj, b, offer, reno, how, months, low, mid):
@@ -286,10 +287,11 @@ def selftest():
     assert _km((39.0, -86.0), (39.0, -86.0)) == 0
 
     # פ"ל: משחזר את עסקת הדוגמה מ-CLAUDE.md § 46236 Geist, מזומן מלא
-    d = deal(301_000, 158_284, 52_416, 7.14)
+    d = deal(301_000, 158_284, 52_416, 7.14, "46236")
     assert abs(d["basis"] - 220_010) < 50, d["basis"]      # התיעוד: $220,014
-    assert abs(d["offer_rule"] - (RULE * 301_000 - 52_416)) < 1, d["offer_rule"]
-    assert abs(deal(301_000, 0)["offer_rule"] - (0.70 * 301_000 - 52_416) - 0.02 * 301_000) < 1   # 72% = 70% + $6,020
+    assert d["rule"] == 0.72 and abs(d["offer_rule"] - (0.72 * 301_000 - 52_416)) < 1, d["offer_rule"]
+    dn = deal(301_000, 0, zip5="46220")                    # הצפון: 69%
+    assert dn["rule"] == 0.69 and abs(dn["offer_rule"] - (0.69 * 301_000 - 52_416)) < 1
     assert abs(d["profit"] - 56_158) < 50, d["profit"]
     # עלויות רכישה קבועות: הצעה כפולה לא מכפילה אותן (Excel B20:B23, לא אחוז)
     assert deal(301_000, 2 * 158_284)["basis"] - d["basis"] == 158_284

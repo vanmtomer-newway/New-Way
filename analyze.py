@@ -26,8 +26,8 @@ LANDLORDS = {"AMERICAN INTERNATIONAL HOME"}
 
 def filter_analysis(sales, flips):
     """
-    כלל ההצעה (RULE, 72%):  הצעה ≤ RULE·ARV − שיפוץ
-    ולכן:                   מרווח = מכירה − קנייה ≥ (1−RULE)·ARV + שיפוץ
+    כלל ההצעה (BUY BOX 72% · צפון 69%):  הצעה ≤ RULE·ARV − שיפוץ
+    ולכן:                                  מרווח = מכירה − קנייה ≥ (1−RULE)·ARV + שיפוץ
 
     זו כל התשובה. הכלל לא דורש "מרווח טוב" — הוא דורש מרווח שגדל
     עם מחיר המכירה. ככל שהנכס יקר יותר, הרף עולה בדולרים.
@@ -37,14 +37,16 @@ def filter_analysis(sales, flips):
     print(f"\n{'='*74}\nלמה המסנן צר\n{'='*74}")
     print(f"\nמכירה חציונית בפליפים שנמדדו:   ${S:,.0f}")
     print(f"מרווח גולמי חציוני:             ${spread:,.0f}  ({spread/S*100:.0f}% מהמכירה)")
-    R = sdf.RULE
-    print(f"\nכלל ה-{R:.0%} בתקציב שיפוץ $52,416 דורש:")
-    print(f"   מרווח ≥ {1-R:.2f} × ${S:,.0f} + $52,416 = ${(1-R)*S + 52416:,.0f}")
-    print(f"   👉 פי {((1-R)*S + 52416)/spread:.2f} מהמרווח החציוני בשוק.")
-    for lbl, zz in (("BUY BOX", sdf.BUY_BOX), ("שכבה צפונית", sdf.NORTH)):
+    print(f"\nמה הכלל דורש בתקציב שיפוץ $52,416, לפי שכבה:")
+    for lbl, key, zz in (("BUY BOX", "BUY", sdf.BUY_BOX), ("שכבה צפונית", "NORTH", sdf.NORTH)):
         g = [f for f in flips if f["zip"] in zz]
-        if g:
-            print(f"   {lbl}: {len(g):,} פליפים, עוברים {sum(R*f['sell']-f['buy'] >= 52_416 for f in g)/len(g):.0%}")
+        if not g:
+            continue
+        R, Sg = sdf.RULES[key], st.median([f["sell"] for f in g])
+        spg, need = st.median([f["sell"] - f["buy"] for f in g]), (1 - sdf.RULES[key]) * st.median([f["sell"] for f in g]) + 52_416
+        print(f"   {lbl} ({R:.0%}): מרווח ≥ {1-R:.2f} × ${Sg:,.0f} + $52,416 = ${need:,.0f} — פי {need/spg:.2f} "
+              f"מהמרווח החציוני (${spg:,.0f}) · {len(g):,} פליפים, עוברים "
+              f"{sum(R*f['sell']-f['buy'] >= 52_416 for f in g)/len(g):.0%}")
     print(f"\nכלומר הכלל לא 'מחמיר' — הוא מכייל לשוק עם מרווחים רחבים יותר.")
 
     print(f"\n{'-'*74}\nרגישות: אחוז מ-{len(flips):,} הפליפים שהיו עוברים\n{'-'*74}")
@@ -66,14 +68,14 @@ def filter_analysis(sales, flips):
         grp = [f for f in flips if lo < f["months"] <= hi]
         if len(grp) < 20:
             continue
-        pas = sum(1 for g in grp if sdf.RULE * g["sell"] - g["buy"] >= 52_416) / len(grp) * 100
+        pas = sum(1 for g in grp if sdf.rule_for(g["zip"]) * g["sell"] - g["buy"] >= 52_416) / len(grp) * 100
         oo = sum(1 for g in grp if g["owner_occ"]) / len(grp) * 100
         print(f"{lbl:>26}{len(grp):>7,}"
               f"{st.median([g['sell']-g['buy'] for g in grp]):>11,.0f}"
               f"{st.median([g['mult'] for g in grp]):>8.2f}{oo:>10.0f}%{pas:>7.0f}%")
-    p_all = sum(1 for f in flips if sdf.RULE * f["sell"] - f["buy"] >= 52_416) / len(flips) * 100
+    p_all = sum(1 for f in flips if sdf.rule_for(f["zip"]) * f["sell"] - f["buy"] >= 52_416) / len(flips) * 100
     nw = [f for f in flips if f["months"] > 2]
-    p_nw = sum(1 for f in nw if sdf.RULE * f["sell"] - f["buy"] >= 52_416) / len(nw) * 100
+    p_nw = sum(1 for f in nw if sdf.rule_for(f["zip"]) * f["sell"] - f["buy"] >= 52_416) / len(nw) * 100
     print(f"\nהוצאת ה-wholesale מעלה את שיעור המעבר מ-{p_all:.0f}% ל-{p_nw:.0f}% בלבד.")
     print("זה מסביר חלק מהפער, לא את כולו. מדרגת המחיר מסבירה יותר — ראה למטה.")
 
@@ -88,13 +90,13 @@ def filter_analysis(sales, flips):
     print(f"\n{'-'*74}\nלפי מדרגת מחיר מכירה\n{'-'*74}")
     bands = [(0, 150_000), (150_000, 200_000), (200_000, 250_000),
              (250_000, 300_000), (300_000, 400_000), (400_000, 10**9)]
-    print(f"{'מדרגה':>20}{'n':>7}{'מרווח חציוני':>15}{'עובר ' + format(sdf.RULE, '.0%') + '/$52K':>16}")
+    print(f"{'מדרגה':>20}{'n':>7}{'מרווח חציוני':>15}{'עובר הכלל/$52K':>16}")
     for lo, hi in bands:
         grp = [f for f in flips if lo <= f["sell"] < hi]
         if len(grp) < 10:
             continue
         sp = st.median([g["sell"] - g["buy"] for g in grp])
-        pas = sum(1 for g in grp if sdf.RULE * g["sell"] - g["buy"] >= 52_416) / len(grp) * 100
+        pas = sum(1 for g in grp if sdf.rule_for(g["zip"]) * g["sell"] - g["buy"] >= 52_416) / len(grp) * 100
         lbl = f"${lo//1000}K–{hi//1000}K" if hi < 10**9 else f"${lo//1000}K+"
         print(f"{lbl:>20}{len(grp):>7,}{sp:>15,.0f}{pas:>15.0f}%")
 
@@ -161,13 +163,13 @@ def top_flippers(flips, n=15, reno=52_416):
     """
     end = max(f["date"] for f in flips)
     since = f"{int(end[:4]) - 2}{end[4:]}"
-    pas = [f for f in flips if f["date"] >= since and sdf.RULE * f["sell"] - f["buy"] >= reno]
+    pas = [f for f in flips if f["date"] >= since and sdf.rule_for(f["zip"]) * f["sell"] - f["buy"] >= reno]
     by = defaultdict(list)
     for f in pas:
         by[f["flipper"] or "?"].append(f)
     top = sorted(by.items(), key=lambda kv: -len(kv[1]))[:n]
-    print(f"\n{'='*74}\nמי עושה את העסק שלך — קוני הפליפים שעוברים את כלל ה-{sdf.RULE:.0%}"
-          f" (${reno:,}), {since[:7]}–{end[:7]}\n{'='*74}")
+    print(f"\n{'='*74}\nמי עושה את העסק שלך — קוני הפליפים שעוברים את הכלל "
+          f"(BUY BOX {sdf.RULES['BUY']:.0%} · צפון {sdf.RULES['NORTH']:.0%}, ${reno:,}), {since[:7]}–{end[:7]}\n{'='*74}")
     print(f"{len(pas)} עסקאות · {len(by)} קונים שונים · {n} הגדולים = "
           f"{sum(len(v) for _, v in top)/max(1, len(pas)):.0%}  ← שוק מפוצל, אין שחקן דומיננטי")
     print(f"\n{'קונה':<28}{'עסקאות':>7}{'מרווח':>10}{'החזקה':>7}{'תופס':>6}  זיפים")

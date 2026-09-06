@@ -34,6 +34,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
+from urllib.error import HTTPError
 
 import sdf, arv, analyze
 
@@ -150,8 +151,17 @@ def read_rentcast(zips=sdf.TARGET):
     for z in zips:
         q = urlencode({"zipCode": z, "status": "Active", "propertyType": "Single Family", "limit": 500})
         req = Request(f"{RENTCAST_URL}?{q}", headers={"X-Api-Key": key, "Accept": "application/json"})
-        with urlopen(req, timeout=60) as r:
-            data = json.loads(r.read().decode("utf-8"))
+        try:
+            with urlopen(req, timeout=60) as r:
+                data = json.loads(r.read().decode("utf-8"))
+        except HTTPError as e:
+            body = e.read().decode("utf-8", "replace")[:300]
+            if e.code == 403 and "subscription-inactive" in body:
+                sys.exit("⚠️ המפתח קיים אבל התוכנית לא הופעלה. ב-app.rentcast.io/app/api לבחור את תוכנית "
+                         "Developer (חינם, 50 בקשות בחודש) ולהפעיל אותה — ואז להריץ שוב. הבקשה לא נספרה במכסה.")
+            if e.code == 429:
+                sys.exit("⚠️ נגמרה המכסה החודשית של RentCast (50 בקשות). מתחדשת בתחילת החודש, או להעלות תוכנית.")
+            sys.exit(f"⚠️ RentCast החזיר {e.code}: {body}")
         out.extend(_from_rentcast(L) for L in data)
         print(f"  RentCast {z}: {len(data)} מודעות", file=sys.stderr)
     return out, Counter()
@@ -211,11 +221,12 @@ def parcel_av(address, zip5, cache):
 
 def score(L, band, reno, parcel):
     """כל המספרים של שורה אחת. פונקציה טהורה — זו שנבדקת ב-selftest."""
-    offer = arv.RULE * band["arv"] - reno
-    return {**L, "arv": band["arv"], "low": band["low"], "n": band["n"], "reno": reno,
+    rule = sdf.rule_for(L["zip"])
+    offer = rule * band["arv"] - reno
+    return {**L, "arv": band["arv"], "low": band["low"], "n": band["n"], "reno": reno, "rule": rule,
             "offer_rule": offer, "gap": (L["price"] - offer) / L["price"],
-            "profit_rule": arv.deal(band["low"], offer, reno)["profit"],
-            "profit_ask": arv.deal(band["low"], L["price"], reno)["profit"],
+            "profit_rule": arv.deal(band["low"], offer, reno, zip5=L["zip"])["profit"],
+            "profit_ask": arv.deal(band["low"], L["price"], reno, zip5=L["zip"])["profit"],
             "av": parcel.get("av", 0), "owner": parcel.get("owner", ""),
             "rrp": bool(L["year"] and L["year"] < 1978)}
 
@@ -276,24 +287,24 @@ def _f(v, w, money=False):
 
 def print_table(rows, skipped, today, show_all=False):
     rows.sort(key=lambda r: r["gap"])
-    R = f"{arv.RULE:.0%}"
-    print(f"\n{len(rows)} מודעות נחתמו · נתוני מכר עד {today} · ממוין לפי הפער בין המבוקש להצעת כלל ה-{R}")
+    R = f"BUY BOX {sdf.RULES['BUY']:.0%} · צפון {sdf.RULES['NORTH']:.0%}"
+    print(f"\n{len(rows)} מודעות נחתמו · נתוני מכר עד {today} · ממוין לפי הפער בין המבוקש להצעת הכלל ({R})")
     if skipped:
         print("דולגו: " + " · ".join(f"{k} {v}" for k, v in skipped.most_common()))
-    hdr = (f"{'ZIP':<7}{'מבוקש':>10}{'DOM':>5}{'sqft':>7}{'שנה':>6}{'ARV':>10}{R + ' מתיר':>10}"
-           f"{'פער':>6}{'רווח@' + R:>10}{'רווח@מבוקש':>12}{'שומה':>11}{'n':>3}  כתובת")
+    hdr = (f"{'ZIP':<7}{'כלל':>5}{'מבוקש':>10}{'DOM':>5}{'sqft':>7}{'שנה':>6}{'ARV':>10}{'הכלל מתיר':>10}"
+           f"{'פער':>6}{'רווח@כלל':>10}{'רווח@מבוקש':>12}{'שומה':>11}{'n':>3}  כתובת")
     print("\n" + hdr)
-    print("-" * 106)
+    print("-" * 111)
     for r in rows if show_all else rows[:40]:
         tag = (" ⚠️RRP" if r["rrp"] else "") + (f" ↓{r['cuts']}" if r.get("cuts") else "")
-        print(f"{r['zip']:<7}{r['price']:>10,.0f}{_f(r['dom'], 5)}{_f(r['sqft'], 7)}{_f(r['year'], 6)}"
+        print(f"{r['zip']:<7}{r['rule']:>5.0%}{r['price']:>10,.0f}{_f(r['dom'], 5)}{_f(r['sqft'], 7)}{_f(r['year'], 6)}"
               f"{r['arv']:>10,.0f}{r['offer_rule']:>10,.0f}{r['gap']:>6.0%}{r['profit_rule']:>10,.0f}"
               f"{r['profit_ask']:>12,.0f}{_f(r['av'], 11)}{r['n']:>3}  {r['address'][:28]}{tag}")
     if not show_all and len(rows) > 40:
         print(f"... ועוד {len(rows) - 40}. --all להכל.")
     print(f"""
-פער      = כמה מתחת למבוקש צריך לקנות כדי לעמוד בכלל ה-{R}. מתחת ל-15% על מודעה תקועה — יש שיחה.
-רווח     = תרחיש תחתון (ARV − לפי שכבה: BUY BOX {arv.ERR['BUY'][0]:.1%}, צפון {arv.ERR['NORTH'][0]:.1%}), מזומן מלא, {arv.MONTHS_DEFAULT} ח'. @{R} = בהצעת הכלל; @מבוקש = במחיר מלא.
+פער      = כמה מתחת למבוקש צריך לקנות כדי לעמוד בכלל ({R}). מתחת ל-15% על מודעה תקועה — יש שיחה.
+רווח     = תרחיש תחתון (ARV − לפי שכבה: BUY BOX {arv.ERR['BUY'][0]:.1%}, צפון {arv.ERR['NORTH'][0]:.1%}), מזומן מלא, {arv.MONTHS_DEFAULT} ח'. @כלל = בהצעת הכלל; @מבוקש = במחיר מלא.
 שיפוץ    = sqft × ${arv.RENO_SQFT} (+${arv.RENO_PRE78} לפני 1978, ⚠️RRP) × {1 + arv.RENO_RESERVE:.2f}. בלי sqft: ${arv.RENO_DEFAULT:,}.
 שומה '—' = לא נמצאה ברשומות השומה ⇒ קומפס בלי סינון גודל, טווח רחב יותר.
 🔴 ARV הוא חציון קומפס, לא מספר. לפני הצעה: --comps "<כתובת>" ולהסתכל בעיניים.""")
@@ -342,9 +353,11 @@ def selftest():
     reno = arv.reno_budget(L["sqft"], L["year"])
     assert abs(reno - 1_442 * 40 * 1.17) < 1              # לפני 1978 ⇒ $40/sqft
     s = score(L, band, reno, {"av": 297_200})
-    assert abs(s["offer_rule"] - (arv.RULE * 301_000 - reno)) < 1
+    assert s["rule"] == 0.72 and abs(s["offer_rule"] - (0.72 * 301_000 - reno)) < 1
     assert abs(s["gap"] - (289_900 - s["offer_rule"]) / 289_900) < 1e-9
     assert s["profit_ask"] < s["profit_rule"] and s["rrp"] and s["av"] == 297_200
+    s2 = score(dict(L, zip="46220"), band, reno, {})                # צפון: 69%
+    assert s2["rule"] == 0.69 and abs(s2["offer_rule"] - (0.69 * 301_000 - reno)) < 1 and s2["av"] == 0
     # רחוב: מדלגים על קידומת כיוון; כתובת בלי מספר לא נשלחת לשרת
     assert _street("5302 N ARLINGTON AVE") == ("5302", "ARLINGTON")
     assert _street("8058 Cherrybark Dr.") == ("8058", "CHERRYBARK")
@@ -374,7 +387,7 @@ if __name__ == "__main__":
     args = sys.argv[1:]
     if args and args[0] in ("-h", "--help"):
         sys.exit(__doc__)
-    if args[0] == "selftest":
+    if args and args[0] == "selftest":
         selftest()
         sys.exit()
     dom_min = float(args[args.index("--dom") + 1]) if "--dom" in args else 0

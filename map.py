@@ -112,7 +112,6 @@ def county_polygons():
 BLUE_LINE = [[39.7690, -86.2600], [39.7685, -86.2000], [39.7680, -86.1580],
              [39.7700, -86.1000], [39.7720, -86.0500], [39.7740, -86.0100]]
 
-RULE = sdf.RULE
 
 
 def zip_polygons(wanted):
@@ -249,7 +248,7 @@ def build():
             "a": f["address"][:44], "b": round(f["buy"]), "s": round(f["sell"]),
             "m": round(f["months"], 1), "x": round(f["mult"], 2),
             "d": f["date"][:7], "bd": f["buy_date"][:7],
-            "r": round(RULE * f["sell"] - f["buy"]),   # תקציב שכלל ההצעה מתיר
+            "r": round(sdf.rule_for(f["zip"]) * f["sell"] - f["buy"]),   # תקציב שכלל ההצעה מתיר, לפי שכבה
             "ds": 1 if f["buy_distress"] else 0,
             "oo": 1 if f["owner_occ"] else 0,
         })
@@ -280,7 +279,7 @@ def build():
         "geo_rate": round(len(pts) / max(len(flips), 1) * 100),
     }
     html = (TEMPLATE.replace("__DATA__", json.dumps(payload, ensure_ascii=False))
-            .replace("__RULE__", f"{sdf.RULE:.0%}"))
+            .replace("__RULE__", f"{sdf.RULES['BUY']:.0%} · צפון {sdf.RULES['NORTH']:.0%}"))
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(html)
     mb = os.path.getsize(OUT) / 1e6
