@@ -16,7 +16,8 @@
     (מול 350 בייצוא של Redfin). היסטוריית המחירים (↓N) עוד לא נבדקה על נתונים אמיתיים.
 
     python3 listings.py                    # אוסף redfin_*.csv מ-Downloads (30 יום) אל data/redfin/ ומריץ הכל
-    python3 listings.py --dom 30           # רק מודעות שיושבות מעל 30 יום
+    python3 listings.py --dom 90 --cuts 2  # ערוץ הרכישה: תקועות מעל 90 יום עם 2 הורדות מחיר (RentCast)
+    python3 listings.py --min-arv 0 --max-offer 9e9   # לבטל את ברירות המחדל: ARV ≥ $200K, הצעה ≤ $350K
     python3 listings.py --comps "8058 CHERRYBARK"     # הקומפס של מודעה אחת, לעין אנושית
     python3 listings.py some.csv other.csv # קבצים מפורשים
     python3 listings.py --rentcast         # 12 זיפי היעד מ-RentCast
@@ -30,9 +31,9 @@
 במטמון. 🔴 חיפוש לפי נקודה נפסל: קואורדינטות מגאוקוד נוחתות על החלקה השכנה
 (6259 Chadworth החזיר את 6251 — נמדד 6.9.2026).
 """
-import csv, glob, json, os, re, shutil, sys, time, importlib, tempfile
+import csv, glob, json, os, re, shutil, sys, time, importlib, tempfile, statistics as st
 from concurrent.futures import ThreadPoolExecutor
-from collections import Counter
+from collections import Counter, defaultdict
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
@@ -235,11 +236,21 @@ def parcel_av(address, zip5, cache):
 
 # ─────────────────────────────── החיתום ───────────────────────────────
 
-def score(L, band, reno, parcel):
-    """כל המספרים של שורה אחת. פונקציה טהורה — זו שנבדקת ב-selftest."""
+def score(L, band, reno, parcel, ppsf_zip=None):
+    """
+    כל המספרים של שורה אחת. פונקציה טהורה — זו שנבדקת ב-selftest.
+    דגלים (מהריצה האמיתית הראשונה, 6.9.2026): 'ARV' — ARV לרגל גבוה פי 1.7+ מהמבוקש
+    החציוני בזיפ ⇒ הקומפס גדולים מהבית (בית של 842 sqft קיבל $285K). 'שומה' — שומה
+    מתחת ל-$40K = מגרש: בית הרוס, או שהקומפס היו בנייה חדשה.
+    """
     rule = sdf.rule_for(L["zip"])
     offer = rule * band["arv"] - reno
-    return {**L, "arv": band["arv"], "low": band["low"], "n": band["n"], "reno": reno, "rule": rule,
+    flags = []
+    if L["sqft"] and ppsf_zip and band["arv"] / L["sqft"] > 1.7 * ppsf_zip:
+        flags.append("ARV")
+    if parcel.get("av") and parcel["av"] < 40_000:
+        flags.append("שומה")
+    return {**L, "arv": band["arv"], "low": band["low"], "n": band["n"], "reno": reno, "rule": rule, "flags": flags,
             "offer_rule": offer, "gap": (L["price"] - offer) / L["price"],
             "profit_rule": arv.deal(band["low"], offer, reno, zip5=L["zip"])["profit"],
             "profit_ask": arv.deal(band["low"], L["price"], reno, zip5=L["zip"])["profit"],
@@ -247,12 +258,17 @@ def score(L, band, reno, parcel):
             "rrp": bool(L["year"] and L["year"] < 1978)}
 
 
-def underwrite(listings, dom_min=0, comps_for=None):
+def underwrite(listings, dom_min=0, comps_for=None, min_arv=200_000, max_offer=350_000, cuts_min=0):
     zips = set(sdf.TARGET)
     sales, loc = arv.market()
     today = max(s["date"] for s in loc)
     cache = json.load(open(AV_CACHE, encoding="utf-8")) if os.path.exists(AV_CACHE) else {}
     rows, skipped = [], Counter()
+    ppsf = defaultdict(list)                   # מבוקש לרגל, חציון לכל זיפ — לבדיקת סבירות של ה-ARV
+    for L in listings:
+        if L["zip"] in zips and L["price"] and L["sqft"]:
+            ppsf[L["zip"]].append(L["price"] / L["sqft"])
+    ppsf = {z: st.median(v) for z, v in ppsf.items()}
     todo = [L for L in listings if L["zip"] in zips and L["price"] and L["lat"]
             and (not dom_min or (L["dom"] or 0) >= dom_min)
             and f"{L['address']}|{L['zip']}".upper() not in cache]
@@ -284,7 +300,17 @@ def underwrite(listings, dom_min=0, comps_for=None):
             continue
         if comps_for and comps_for.upper() in L["address"].upper():
             _print_comps(L, comps, b, p)
-        rows.append(score(L, b, arv.reno_budget(L["sqft"], L["year"]), p))
+        if b["arv"] < min_arv:                 # מתחת ל-$200K ATTOM מודדת הפסד — לא הפרודקט
+            skipped[f"ARV מתחת ל-${min_arv/1e3:.0f}K"] += 1
+            continue
+        row = score(L, b, arv.reno_budget(L["sqft"], L["year"]), p, ppsf.get(L["zip"]))
+        if row["offer_rule"] > max_offer:      # מעל ההון לסלוט אחד
+            skipped[f"הצעת הכלל מעל ${max_offer/1e3:.0f}K"] += 1
+            continue
+        if cuts_min and (L["cuts"] or 0) < cuts_min:
+            skipped[f"פחות מ-{cuts_min:.0f} הורדות מחיר"] += 1
+            continue
+        rows.append(row)
     with open(AV_CACHE, "w", encoding="utf-8") as f:
         json.dump(cache, f, ensure_ascii=False)
     return rows, skipped, today
@@ -308,7 +334,7 @@ def _f(v, w, money=False):
 
 
 def print_table(rows, skipped, today, show_all=False):
-    rows.sort(key=lambda r: r["gap"])
+    rows.sort(key=lambda r: (bool(r["flags"]), r["gap"]))      # מסומנים בסוף
     R = f"BUY BOX {sdf.RULES['BUY']:.0%} · צפון {sdf.RULES['NORTH']:.0%}"
     print(f"\n{len(rows)} מודעות נחתמו · נתוני מכר עד {today} · ממוין לפי הפער בין המבוקש להצעת הכלל ({R})")
     if skipped:
@@ -318,10 +344,11 @@ def print_table(rows, skipped, today, show_all=False):
     print("\n" + hdr)
     print("-" * 111)
     for r in rows if show_all else rows[:40]:
-        tag = (" ⚠️RRP" if r["rrp"] else "") + (f" ↓{r['cuts']}" if r.get("cuts") else "")
+        tag = ((" ⚠️RRP" if r["rrp"] else "") + (f" ↓{r['cuts']}" if r.get("cuts") else "")
+               + (" 🚩" + "/".join(r["flags"]) if r["flags"] else ""))
         print(f"{r['zip']:<7}{r['rule']:>5.0%}{r['price']:>10,.0f}{_f(r['dom'], 5)}{_f(r['sqft'], 7)}{_f(r['year'], 6)}"
               f"{r['arv']:>10,.0f}{r['offer_rule']:>10,.0f}{r['gap']:>6.0%}{r['profit_rule']:>10,.0f}"
-              f"{r['profit_ask']:>12,.0f}{_f(r['av'], 11)}{r['n']:>3}  {r['address'][:28]}{tag}")
+              f"{r['profit_ask']:>12,.0f}{_f(r['av'], 11)}{r['n']:>3}  {r['address'].split(',')[0][:28]}{tag}")
     if not show_all and len(rows) > 40:
         print(f"... ועוד {len(rows) - 40}. --all להכל.")
     print(f"""
@@ -329,6 +356,8 @@ def print_table(rows, skipped, today, show_all=False):
 רווח     = תרחיש תחתון (ARV − לפי שכבה: BUY BOX {arv.ERR['BUY'][0]:.1%}, צפון {arv.ERR['NORTH'][0]:.1%}), מזומן מלא, {arv.MONTHS_DEFAULT} ח'. @כלל = בהצעת הכלל; @מבוקש = במחיר מלא.
 שיפוץ    = sqft × ${arv.RENO_SQFT} (+${arv.RENO_PRE78} לפני 1978, ⚠️RRP) × {1 + arv.RENO_RESERVE:.2f}. בלי sqft: ${arv.RENO_DEFAULT:,}.
 שומה '—' = לא נמצאה ברשומות השומה ⇒ קומפס בלי סינון גודל, טווח רחב יותר.
+🚩ARV     = ARV לרגל גבוה פי 1.7+ מהמבוקש החציוני בזיפ — הקומפס גדולים מהבית. 🚩שומה = שומה של מגרש, בית הרוס. שניהם ממוינים לסוף.
+מסוננים  = ARV מתחת ל-$200K (מדרגת ההפסד של ATTOM) והצעת כלל מעל $350K (ההון לסלוט אחד). --min-arv / --max-offer לשנות.
 🔴 ARV הוא חציון קומפס, לא מספר. לפני הצעה: --comps "<כתובת>" ולהסתכל בעיניים.""")
     links = [r for r in rows[:15] if r.get("url")]
     if links:
@@ -380,6 +409,11 @@ def selftest():
     assert s["profit_ask"] < s["profit_rule"] and s["rrp"] and s["av"] == 297_200
     s2 = score(dict(L, zip="46220"), band, reno, {})                # צפון: 69%
     assert s2["rule"] == 0.69 and abs(s2["offer_rule"] - (0.69 * 301_000 - reno)) < 1 and s2["av"] == 0
+    # דגלים: ARV $209/sqft מול מבוקש $100/sqft בזיפ = פי 2.1 ⇒ 🚩ARV; מול $150 ⇒ נקי; שומה $30K ⇒ 🚩שומה
+    assert score(L, band, reno, {"av": 297_200}, ppsf_zip=100)["flags"] == ["ARV"]
+    assert score(L, band, reno, {"av": 297_200}, ppsf_zip=150)["flags"] == []
+    assert score(L, band, reno, {"av": 30_000}, ppsf_zip=150)["flags"] == ["שומה"]
+    assert s["flags"] == []
     # רחוב: מדלגים על קידומת כיוון; כתובת בלי מספר לא נשלחת לשרת
     assert _street("5302 N ARLINGTON AVE") == ("5302", "ARLINGTON")
     assert _street("8058 Cherrybark Dr.") == ("8058", "CHERRYBARK")
@@ -412,7 +446,10 @@ if __name__ == "__main__":
     if args and args[0] == "selftest":
         selftest()
         sys.exit()
-    dom_min = float(args[args.index("--dom") + 1]) if "--dom" in args else 0
+    def opt(flag, default):
+        return float(args[args.index(flag) + 1]) if flag in args else default
+    dom_min, cuts_min = opt("--dom", 0), opt("--cuts", 0)
+    min_arv, max_offer = opt("--min-arv", 200_000), opt("--max-offer", 350_000)
     comps_for = args[args.index("--comps") + 1] if "--comps" in args else None
     if "--rentcast" in args:
         listings, skipped = read_rentcast()
@@ -425,5 +462,5 @@ if __name__ == "__main__":
             sys.exit("אין קבצי redfin_*.csv — להוריד מ-Redfin (\"Download All\" בתחתית החיפוש) ל-Downloads ולהריץ שוב.\n"
                      "שימוש: python3 listings.py [קבצים.csv] [--dom 30] [--comps \"כתובת\"] [--all]  |  --rentcast")
         listings, skipped = read_redfin(paths)
-    rows, more, today = underwrite(listings, dom_min, comps_for)
+    rows, more, today = underwrite(listings, dom_min, comps_for, min_arv, max_offer, cuts_min)
     print_table(rows, skipped + more, today, "--all" in args)

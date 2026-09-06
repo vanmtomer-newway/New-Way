@@ -81,10 +81,11 @@ def find_comps(loc, ll, before, av=0, k=K_COMPS, months=COMP_MONTHS,
     הקומפס: מכירות לקונה תופס בעצמו, בחלון של `months` לפני `before`,
     הקרובות ביותר גאוגרפית, ואם ידוע שווי שומה — גם דומות בגודל.
 
-    קונה תופס הוא הפרוקסי ל"נמכר משופץ במחיר קמעונאי". זו ההגדרה שמדדה 12.6%;
-    שינוי שלה מחייב להריץ `backtest` מחדש.
+    קונה תופס הוא הפרוקסי ל"נמכר משופץ במחיר קמעונאי". בנייה חדשה מוחרגת: שומה של
+    מגרש עם מחיר של בית חדש נכנסת לרצועת השומה של בית הרוס ומנפחת לו את ה-ARV
+    (3748 Ruckle, 6.9.2026). שינוי בהגדרה מחייב להריץ `backtest` מחדש.
     """
-    pool = [s for s in loc if s["owner_occ"] and s["parcel"] != exclude
+    pool = [s for s in loc if s["owner_occ"] and s["parcel"] != exclude and not s.get("newc")
             and 0 < sdf._months(s["date"], before) <= months]
     if av and av_band:
         pool = [s for s in pool if s["av"] > 0
