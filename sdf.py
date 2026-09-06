@@ -14,16 +14,18 @@ IC 6-1.1-5.5 מחייבת טופס גילוי עם המחיר בפועל בכל 
 הרצה:
     python3 sdf.py report            # תמונת מצב לכל זיפ ב-BUY BOX
     python3 sdf.py flips             # פליפים אמיתיים שנמצאו, לפי זיפ
+    python3 sdf.py refresh           # מוריד מחדש רק את השנה הנוכחית (~14MB)
     python3 sdf.py selftest          # בדיקה עצמית
 """
 import csv, io, os, sys, zipfile, statistics as st
 from collections import defaultdict
 from datetime import date
 from urllib.request import urlopen, Request
+from urllib.error import HTTPError
 
 BUY_BOX = ["46236", "46217", "46228", "46224", "46229", "46237", "46219", "46107"]
 MARION_COUNTY_ID = "49"
-YEARS = [2023, 2024, 2025, 2026]
+YEARS = list(range(2023, date.today().year + 1))   # מהלוח: בינואר נוספת שנה לבד
 FLIP_MAX_MONTHS = 18        # שתי מכירות רחוקות מזה — כבר לא פליפ
 FLIP_MIN_GAIN = 0.10        # עלייה מתחת לזה היא שוק, לא שיפוץ
 
@@ -38,9 +40,24 @@ def _fetch(year):
         os.makedirs(DATA, exist_ok=True)
         print(f"  מוריד {year}...", file=sys.stderr)
         req = Request(URL.format(year=year), headers={"User-Agent": "Mozilla/5.0"})
-        with urlopen(req, timeout=300) as r, open(path, "wb") as f:
-            f.write(r.read())
+        try:
+            with urlopen(req, timeout=300) as r, open(path + ".part", "wb") as f:
+                f.write(r.read())
+        except HTTPError as e:
+            if e.code == 404 and year == YEARS[-1]:    # ינואר: המדינה עוד לא פרסמה את השנה החדשה
+                print(f"  ⚠️ אין עדיין SDF_{year} — ממשיך בלעדיו", file=sys.stderr)
+                return None
+            raise
+        os.replace(path + ".part", path)           # הורדה שנקטעה לא משאירה zip שבור בשם המלא
     return path
+
+
+def files(years=YEARS):
+    """(שנה, נתיב) לכל שנה זמינה. מדלג על שנה שהמדינה עוד לא פרסמה."""
+    for year in years:
+        path = _fetch(year)
+        if path:
+            yield year, path
 
 
 def _rows(zf, name):
@@ -65,8 +82,8 @@ def _money(rec, key):
 def load(years=YEARS, zips=BUY_BOX):
     """מחזיר מכירות מגורים במריון קאונטי בזיפים המבוקשים, שנה אחר שנה."""
     out = []
-    for year in years:
-        with zipfile.ZipFile(_fetch(year)) as zf:
+    for year, path in files(years):
+        with zipfile.ZipFile(path) as zf:
             names = {n.upper(): n for n in zf.namelist()}
             parcels = defaultdict(list)
             for p in _rows(zf, names["SALEPARCEL.TXT"]):
@@ -94,6 +111,9 @@ def load(years=YEARS, zips=BUY_BOX):
                                     or _yes(s, "C4_Auction"),
                         "av": _int(p.get("P2_5_Total_AV")),
                         "class": (p.get("P2_6_Prop_Class_Code") or "").strip(),
+                        "improved": _yes(p, "A4_Improvement"),   # N = מגרש בלי מבנה
+                        "vacant": _yes(s, "B3_Vacant_Land"),
+                        "newc": _yes(s, "D1_Physical_Change"),   # Y = כמעט תמיד "new construction"
                         "address": (p.get("A5_Street1") or "").strip(),
                         "city": (p.get("A5_City") or "Indianapolis").strip() or "Indianapolis",
                     })
@@ -114,6 +134,15 @@ def _months(a, b):
     return (yb - ya) * 12 + (mb - ma) + (db - da) / 30.4
 
 
+def _new_build(buy, sell):
+    """
+    קבלן שקנה מגרש ומכר עליו בית עונה להגדרת "פליפ" — ואינו כזה.
+    נמדד 6.9.2026: 10% מ"פליפי" ה-BUY BOX, 28% ב-WATCH (46239/46235/46259 הם
+    זיפים של קבלנים). בלי הסינון שיעור המעבר והמכפיל מנופחים.
+    """
+    return buy["class"] == "500" or not buy["improved"] or buy["vacant"] or sell["newc"]
+
+
 def find_flips(sales):
     """
     אותו parcel שנמכר פעמיים בתוך FLIP_MAX_MONTHS עם עלייה משמעותית = פליפ.
@@ -131,6 +160,8 @@ def find_flips(sales):
             if not (0 < gap <= FLIP_MAX_MONTHS):
                 continue
             if sell["price"] < buy["price"] * (1 + FLIP_MIN_GAIN):
+                continue
+            if _new_build(buy, sell):
                 continue
             flips.append({**sell, "buy": buy["price"], "sell": sell["price"],
                           "months": gap, "mult": sell["price"] / buy["price"],
@@ -269,6 +300,33 @@ def _post_batch(payload):
     return {}
 
 
+def stamp(sales):
+    """
+    עד מתי הנתונים מגיעים, וכמה ישן הקובץ. המדינה מעדכנת כל יום שישי ב-10:00,
+    אבל מריון מגישה בפיגור של ~חודשיים — לכן "היום" של הקומפס הוא תאריך המכירה
+    האחרון בקובץ, לא היום בלוח. חייב להיות גלוי בכל הרצה.
+    """
+    end = max((s["date"] for s in sales), default="—")
+    path = os.path.join(DATA, f"SDF_{YEARS[-1]}.zip")
+    age = (date.today() - date.fromtimestamp(os.path.getmtime(path))).days if os.path.exists(path) else None
+    msg = f"נתונים עד {end}"
+    if age is not None:
+        msg += f" · SDF_{YEARS[-1]}.zip הורד לפני {age} ימים"
+        if age >= 14:
+            msg += "  ⚠️ ישן — python3 sdf.py refresh"
+    print(msg, file=sys.stderr)
+    return end
+
+
+def refresh():
+    """מוריד מחדש רק את השנה הנוכחית. שאר השנים סגורות ולא משתנות."""
+    path = os.path.join(DATA, f"SDF_{YEARS[-1]}.zip")
+    if os.path.exists(path):
+        os.remove(path)
+    if _fetch(YEARS[-1]):
+        stamp(load())
+
+
 def selftest():
     assert _money({"p": "18500000"}, "p") == 185_000.0
     assert _money({"p": ""}, "p") == 0.0
@@ -276,8 +334,9 @@ def selftest():
     assert abs(_months("2026-01-01", "2026-07-01") - 6) < 0.1
     assert abs(_months("2025-06-15", "2026-06-15") - 12) < 0.1
     # פליפ אמיתי נתפס; מכירה חוזרת אחרי שנתיים או בלי עלייה — לא
-    base = {"zip": "46219", "dom": 0, "owner_occ": True, "distress": False,
-            "av": 0, "class": "", "address": "", "city": "Indianapolis"}
+    base = {"zip": "46219", "dom": 0, "owner_occ": True, "distress": False, "av": 0,
+            "class": "510", "improved": True, "vacant": False, "newc": False,
+            "address": "", "city": "Indianapolis"}
     flips = find_flips([
         {**base, "parcel": "A", "date": "2025-01-10", "price": 100_000},
         {**base, "parcel": "A", "date": "2025-09-10", "price": 180_000},  # פליפ
@@ -288,6 +347,16 @@ def selftest():
     ])
     assert len(flips) == 1, flips
     assert flips[0]["parcel"] == "A" and abs(flips[0]["mult"] - 1.8) < 1e-9
+    # בנייה חדשה אינה פליפ: מגרש -> בית, או בית שסומן D1 (physical change) במכירה
+    assert not find_flips([
+        {**base, "parcel": "D", "date": "2025-01-10", "price": 60_000, "class": "500", "improved": False},
+        {**base, "parcel": "D", "date": "2025-09-10", "price": 360_000},
+    ])
+    assert not find_flips([
+        {**base, "parcel": "E", "date": "2025-01-10", "price": 100_000},
+        {**base, "parcel": "E", "date": "2025-09-10", "price": 360_000, "newc": True},
+    ])
+    assert YEARS[0] == 2023 and YEARS[-1] == date.today().year
     assert _geo_key({"address": "1 Main St", "city": "Indy", "zip": "46219"}) \
         == "1 MAIN ST|INDY|46219"
     print("selftest: ok")
@@ -297,8 +366,11 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "report"
     if cmd == "selftest":
         selftest()
+    elif cmd == "refresh":
+        refresh()
     else:
         sales = load()
+        stamp(sales)
         if cmd == "geo":
             print(f"במטמון: {len(geocode(sales)):,} כתובות עם קואורדינטות")
         else:

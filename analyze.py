@@ -2,7 +2,7 @@
 """
 שני ניתוחים שהמפה לא עונה עליהם:
 
-    python3 analyze.py filter     # למה כלל ה-70% תופס רק 19%, ואיך מרחיבים
+    python3 analyze.py filter     # למה כלל ה-70% תופס רק ~16%, ואיך מרחיבים
     python3 analyze.py rivals     # המודל העסקי של המתחרים, מתוך רישומי המכר
     python3 analyze.py inventory  # המלאי החי — מה כל אחד מחזיק *עכשיו*
 """
@@ -66,7 +66,10 @@ def filter_analysis(sales, flips):
         print(f"{lbl:>26}{len(grp):>7,}"
               f"{st.median([g['sell']-g['buy'] for g in grp]):>11,.0f}"
               f"{st.median([g['mult'] for g in grp]):>8.2f}{oo:>10.0f}%{pas:>7.0f}%")
-    print("\nהוצאת ה-wholesale מעלה את שיעור המעבר מ-19% ל-22-23% בלבד.")
+    p_all = sum(1 for f in flips if 0.70 * f["sell"] - f["buy"] >= 52_416) / len(flips) * 100
+    nw = [f for f in flips if f["months"] > 2]
+    p_nw = sum(1 for f in nw if 0.70 * f["sell"] - f["buy"] >= 52_416) / len(nw) * 100
+    print(f"\nהוצאת ה-wholesale מעלה את שיעור המעבר מ-{p_all:.0f}% ל-{p_nw:.0f}% בלבד.")
     print("זה מסביר חלק מהפער, לא את כולו. מדרגת המחיר מסבירה יותר — ראה למטה.")
 
     # ⚠️ C8_Market_Days אינו שמיש כאינדיקטור מחוץ-לשוק
@@ -96,8 +99,8 @@ def filter_analysis(sales, flips):
 def _buyer_index(zips):
     """SDF_ID -> (שם קונה, חברת טייטל) עבור כל העסקאות בזיפים המבוקשים."""
     buyers, titles = {}, {}
-    for year in sdf.YEARS:
-        with zipfile.ZipFile(sdf._fetch(year)) as zf:
+    for year, path in sdf.files():
+        with zipfile.ZipFile(path) as zf:
             names = {n.upper(): n for n in zf.namelist()}
             keep = set()
             for p in sdf._rows(zf, names["SALEPARCEL.TXT"]):
@@ -118,8 +121,8 @@ def _buyer_index(zips):
 def _sale_ids(zips):
     """(parcel, date) -> SDF_ID, כדי לקשר בין רשומת מכירה לשם הקונה."""
     out = {}
-    for year in sdf.YEARS:
-        with zipfile.ZipFile(sdf._fetch(year)) as zf:
+    for year, path in sdf.files():
+        with zipfile.ZipFile(path) as zf:
             names = {n.upper(): n for n in zf.namelist()}
             parcels = {}
             for p in sdf._rows(zf, names["SALEPARCEL.TXT"]):

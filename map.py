@@ -170,8 +170,8 @@ def zip_stats(sales, flips):
 def title_companies(years=sdf.YEARS):
     """מי סוגר את העסקאות בזיפי ה-BUY BOX. Contact_Type='P' הוא מכין הטופס."""
     counts = Counter()
-    for year in years:
-        with zipfile.ZipFile(sdf._fetch(year)) as zf:
+    for year, path in sdf.files(years):
+        with zipfile.ZipFile(path) as zf:
             names = {n.upper(): n for n in zf.namelist()}
             keep = set()
             parcels = defaultdict(list)
@@ -198,8 +198,8 @@ def active_buyers(sales, flips):
     """
     flip_ids = {(f["parcel"], f["buy_date"]) for f in flips}
     counts, flip_counts = Counter(), Counter()
-    for year in sdf.YEARS:
-        with zipfile.ZipFile(sdf._fetch(year)) as zf:
+    for year, path in sdf.files():
+        with zipfile.ZipFile(path) as zf:
             names = {n.upper(): n for n in zf.namelist()}
             parcels = {}
             for p in sdf._rows(zf, names["SALEPARCEL.TXT"]):

@@ -14,6 +14,7 @@
     python3 arv.py comps 490101100001000001     # קומפס + טווח ARV
     python3 arv.py comps "5302 N ARLINGTON AVE"
     python3 arv.py deal "5302 N ARLINGTON AVE" --offer 158284 --reno 52416
+    python3 arv.py deal "5302 N ARLINGTON AVE" --sqft 1400 --year 1960   # שיפוץ לפי שטח ושנה
     python3 arv.py backtest                     # מייצר מחדש את טבלת הדיוק
     python3 arv.py selftest
 """
@@ -33,11 +34,22 @@ ERR_P90 = 0.429
 
 # ── פ"ל של עסקת מזומן. מקור: `CLAUDE.md` § "העסקה לדוגמה — 46236 Geist" ──
 RULE          = 0.70      # כלל ה-70%
-BUY_CLOSE_PCT = 0.0244    # $3,865 סגירה על רכישה של $158,284
+BUY_CLOSE     = 3_865     # טייטל $2,000 + בדיקה $900 + רישום $65 + היתרים $900. קבוע, לא אחוז (Excel B20:B23)
 EXIT_PCT      = 0.0825    # 8.25% מה-ARV — תיווך + הטבות + סגירה
 HOLD_MONTH    = 763       # $5,449 על 7.14 חודשים
-RENO_DEFAULT  = 52_416    # שיפוץ $32/sqft × 1,400 + 17% רזרבה
 MONTHS_DEFAULT = 7.14
+RENO_SQFT     = 32        # $/sqft, סקופ בינוני, אינדי 2026 (Excel B12)
+RENO_PRE78    = 8         # תוספת למלאי טרום-1978: עופרת, אסבסט, מגולוון (Excel B13)
+RENO_RESERVE  = 0.17      # רזרבה (Excel B16)
+RENO_DEFAULT  = 52_416    # = reno_budget(1400, 1993). כשלא ידוע שטח
+
+
+def reno_budget(sqft, year=None):
+    """תקציב שיפוץ כמו בגיליון מודל_עסקה: sqft × ($32 [+$8 לפני 1978]) × 1.17."""
+    if not sqft:
+        return RENO_DEFAULT
+    rate = RENO_SQFT + (RENO_PRE78 if year and year < 1978 else 0)
+    return sqft * rate * (1 + RENO_RESERVE)
 
 
 def _km(a, b):
@@ -48,6 +60,7 @@ def _km(a, b):
 def market(years=sdf.YEARS, zips=sdf.BUY_BOX):
     """כל המכירות עם קואורדינטות, ממוינות לפי תאריך (לחיתוך חלון מהיר)."""
     sales = sdf.load(years, zips)
+    sdf.stamp(sales)
     geo = sdf.geocode(sales)
     for s in sales:
         s["ll"] = geo.get(sdf._geo_key(s))
@@ -92,7 +105,7 @@ def arv_band(comps):
 
 def deal(arv, offer, reno=RENO_DEFAULT, months=MONTHS_DEFAULT):
     """פ"ל של עסקת מזומן. אין ריבית, אין נקודות, אין שעון מלווה."""
-    basis = offer + offer * BUY_CLOSE_PCT + reno + months * HOLD_MONTH
+    basis = offer + BUY_CLOSE + reno + months * HOLD_MONTH
     exit_costs = arv * EXIT_PCT
     profit = arv - exit_costs - basis
     return {"arv": arv, "basis": basis, "exit": exit_costs, "profit": profit,
@@ -145,7 +158,11 @@ def _print_band(b):
 def cmd_deal(sales, loc, args):
     query = args[0]
     offer = _arg(args, "--offer")
-    reno = _arg(args, "--reno") or RENO_DEFAULT
+    sqft, year = _arg(args, "--sqft"), _arg(args, "--year")
+    reno = _arg(args, "--reno") or reno_budget(sqft, year)
+    how = ("נתון" if _arg(args, "--reno") else
+           f"{sqft:,.0f} sqft × ${RENO_SQFT + (RENO_PRE78 if year and year < 1978 else 0)} × {1 + RENO_RESERVE:.2f}"
+           if sqft else "ברירת מחדל: 1,400 sqft")
     months = _arg(args, "--months") or MONTHS_DEFAULT
     subj = _resolve(sales, loc, query)
     today = max(s["date"] for s in loc)
@@ -159,7 +176,7 @@ def cmd_deal(sales, loc, args):
     if offer is None:
         offer = RULE * b["arv"] - reno
         print(f"\nלא ניתנה הצעה — משתמש בכלל ה-70% על האומדן: ${offer:,.0f}")
-    print(f"\n{'─'*66}\nטווח הרווח — מזומן מלא · שיפוץ ${reno:,.0f} · {months} ח' החזקה")
+    print(f"\n{'─'*66}\nטווח הרווח — מזומן מלא · שיפוץ ${reno:,.0f} ({how}) · {months} ח' החזקה")
     print(f"הצעה ${offer:,.0f}\n")
     print(f"{'תרחיש ARV':<22}{'ARV':>11}{'בסיס':>11}{'רווח':>11}{'על העלות':>11}{'70% מתיר':>11}")
     for lbl, arv in (("p90 שלילי  −42.9%", b["worst"]), ("תחתון  −12.6%", b["low"]),
@@ -241,6 +258,12 @@ def selftest():
     assert abs(d["basis"] - 220_010) < 50, d["basis"]      # התיעוד: $220,014
     assert abs(d["offer_70"] - 158_284) < 1, d["offer_70"]  # התיעוד: $158,284
     assert abs(d["profit"] - 56_158) < 50, d["profit"]
+    # עלויות רכישה קבועות: הצעה כפולה לא מכפילה אותן (Excel B20:B23, לא אחוז)
+    assert deal(301_000, 2 * 158_284)["basis"] - d["basis"] == 158_284
+    # תקציב שיפוץ כמו באקסל: 1,400 sqft × $32 × 1.17 = $52,416; לפני 1978 +$8/sqft
+    assert abs(reno_budget(1400, 1993) - RENO_DEFAULT) < 1
+    assert abs(reno_budget(1400, 1960) - 65_520) < 1
+    assert reno_budget(0) == RENO_DEFAULT and reno_budget(None) == RENO_DEFAULT
     # רווח יורד ב-ARV נמוך יותר, וכל דולר של ARV שווה יותר מדולר של רווח
     # (כי עלויות היציאה גם הן אחוז מה-ARV)
     lo = deal(301_000 * 0.874, 158_284, 52_416, 7.14)
