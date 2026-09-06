@@ -10,9 +10,10 @@
     עד 350 מודעות לחיפוש, מינימום 20 תוצאות, דורש התחברות (חשבון חינמי).
     זו פונקציה שהאתר מציע למשתמש — לא גרידה. הקובץ כולל sqft, שנת בנייה,
     DOM וקואורדינטות — כל מה שהחיתום צריך.
-מקור ב' — RentCast, אוטומטי, רישוי נקי, 50 בקשות בחודש חינם (8 זיפים × 4 = 32):
-    מפתח ב-RENTCAST_API_KEY (סביבה או .env). כולל היסטוריית מחירים ⇒ הורדות מחיר.
-    ⚠️ נכתב לפי התיעוד הרשמי ולא הורץ — אין מפתח. לבדוק בהרצה הראשונה.
+מקור ב' — RentCast, אוטומטי, רישוי נקי, 50 בקשות בחודש חינם. 12 זיפים = 12 בקשות,
+    ריצה שבועית = 48 ⇒ בלי מקום לריצה חוזרת — לכן snapshot יומי ב-data/rentcast/.
+    מפתח ב-RENTCAST_API_KEY (.env). אומת 6.9.2026: 913 מודעות פעילות ב-12 זיפים
+    (מול 350 בייצוא של Redfin). היסטוריית המחירים (↓N) עוד לא נבדקה על נתונים אמיתיים.
 
     python3 listings.py                    # אוסף redfin_*.csv מ-Downloads (30 יום) אל data/redfin/ ומריץ הכל
     python3 listings.py --dom 30           # רק מודעות שיושבות מעל 30 יום
@@ -146,14 +147,29 @@ def _api_key():
 
 
 def read_rentcast(zips=sdf.TARGET):
-    """⚠️ לפי developers.rentcast.io/reference/sale-listings. לא הורץ — אין מפתח."""
+    """
+    12 זיפים = 12 בקשות. המכסה החינמית 50 בחודש ⇒ ריצה שבועית = 48. לכן התשובה
+    הגולמית נשמרת ב-data/rentcast/{יום}_{זיפ}.json: הרצה חוזרת באותו יום חינם,
+    ושבוע על שבוע נצברת היסטוריית מחירים. אומת 6.9.2026: 913 מודעות ב-12 זיפים.
+    """
     key, out = _api_key(), []
+    snap = os.path.join(sdf.DATA, "rentcast")
+    os.makedirs(snap, exist_ok=True)
     for z in zips:
+        path = os.path.join(snap, f"{time.strftime('%Y-%m-%d')}_{z}.json")
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            out.extend(_from_rentcast(L) for L in data)
+            print(f"  RentCast {z}: {len(data)} מודעות (מהשמירה של היום)", file=sys.stderr)
+            continue
         q = urlencode({"zipCode": z, "status": "Active", "propertyType": "Single Family", "limit": 500})
         req = Request(f"{RENTCAST_URL}?{q}", headers={"X-Api-Key": key, "Accept": "application/json"})
         try:
             with urlopen(req, timeout=60) as r:
                 data = json.loads(r.read().decode("utf-8"))
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
         except HTTPError as e:
             body = e.read().decode("utf-8", "replace")[:300]
             if e.code == 403 and "subscription-inactive" in body:
@@ -241,9 +257,15 @@ def underwrite(listings, dom_min=0, comps_for=None):
             and (not dom_min or (L["dom"] or 0) >= dom_min)
             and f"{L['address']}|{L['zip']}".upper() not in cache]
     if todo:                                   # שווי שומה: 4 במקביל, ~0.5 שנייה למודעה
-        print(f"  שולף שווי שומה ל-{len(todo)} מודעות חדשות...", file=sys.stderr)
+        print(f"  שולף שווי שומה ל-{len(todo)} מודעות חדשות (~{len(todo) * 0.45 / 60:.0f} דקות, פעם אחת)...",
+              file=sys.stderr)
         with ThreadPoolExecutor(4) as ex:
-            list(ex.map(lambda L: parcel_av(L["address"], L["zip"], cache), todo))
+            for i, _ in enumerate(ex.map(lambda L: parcel_av(L["address"], L["zip"], cache), todo), 1):
+                if i % 50 == 0 or i == len(todo):
+                    print(f"    {i}/{len(todo)}", file=sys.stderr)
+                if i % 100 == 0:                  # שמירה חלקית — הפסקה באמצע לא מאבדת את מה שנשלף
+                    with open(AV_CACHE, "w", encoding="utf-8") as f:
+                        json.dump(cache, f, ensure_ascii=False)
     for L in listings:
         if L["zip"] not in zips:
             skipped["מחוץ ל-12 זיפי היעד"] += 1
