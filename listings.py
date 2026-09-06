@@ -14,18 +14,23 @@
     מפתח ב-RENTCAST_API_KEY (סביבה או .env). כולל היסטוריית מחירים ⇒ הורדות מחיר.
     ⚠️ נכתב לפי התיעוד הרשמי ולא הורץ — אין מפתח. לבדוק בהרצה הראשונה.
 
-    python3 listings.py data/redfin/*.csv                 # מ-CSV של Redfin
-    python3 listings.py data/redfin/*.csv --dom 90        # רק מודעות תקועות
-    python3 listings.py data/redfin/*.csv --comps "8058 CHERRYBARK"   # הקומפס של מודעה אחת
-    python3 listings.py --rentcast                        # 8 זיפי ה-BUY BOX מ-RentCast
+    python3 listings.py                    # אוסף redfin_*.csv מ-Downloads (30 יום) אל data/redfin/ ומריץ הכל
+    python3 listings.py --dom 30           # רק מודעות שיושבות מעל 30 יום
+    python3 listings.py --comps "8058 CHERRYBARK"     # הקומפס של מודעה אחת, לעין אנושית
+    python3 listings.py some.csv other.csv # קבצים מפורשים
+    python3 listings.py --rentcast         # 12 זיפי היעד מ-RentCast
     python3 listings.py selftest
+
+רק 12 זיפי היעד (`sdf.TARGET`) נחתמים. מודעה מחוץ להם נספרת ומדולגת — קומפס לזיפ
+חדש דורשים גיאוקוד של כל המכירות בו (דקות). להוסיף זיפ = להוסיף אותו ל-`sdf.NORTH`.
 
 הפלט ממוין לפי הפער בין המחיר המבוקש להצעת כלל ההצעה (sdf.RULE): פער קטן = עסקה קרובה.
 שווי השומה לכל מודעה נשלף מרשומות השומה (xmaps) לפי מספר בית + רחוב, ונשמר
 במטמון. 🔴 חיפוש לפי נקודה נפסל: קואורדינטות מגאוקוד נוחתות על החלקה השכנה
 (6259 Chadworth החזיר את 6251 — נמדד 6.9.2026).
 """
-import csv, json, os, re, sys, importlib, tempfile
+import csv, glob, json, os, re, shutil, sys, time, importlib, tempfile
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
@@ -79,6 +84,8 @@ def read_redfin(paths):
         if missing:
             sys.exit(f"⚠️ {path}: חסרות עמודות {missing}.\n   הכותרות שנמצאו: {h}")
         for r in rows[1:]:
+            if len(r) <= 2:            # שורת הערה של Redfin ("some MLS listings are not included")
+                continue
             def g(k):
                 i = idx[k]
                 return r[i].strip() if i is not None and i < len(r) else ""
@@ -96,7 +103,7 @@ def read_redfin(paths):
                         "sqft": _num(g("sqft")), "year": _num(g("year")), "dom": _num(g("dom")),
                         "lat": lat, "lon": lon, "url": g("url"), "status": g("status"),
                         "mls": g("mls"), "cuts": None})
-    seen, uniq = set(), []                      # מכירה רב-חלקתית / חיפושים חופפים -> אותה מודעה פעמיים
+    seen, uniq = set(), []                      # חיפושים חופפים / שבועות עוקבים -> אותה מודעה פעמיים. הראשון = החדש
     for L in out:
         if (L["address"].upper(), L["zip"]) not in seen:
             seen.add((L["address"].upper(), L["zip"]))
@@ -104,6 +111,22 @@ def read_redfin(paths):
     if len(out) - len(uniq):
         skipped["כפולים"] += len(out) - len(uniq)
     return uniq, skipped
+
+
+def collect_downloads(days=30):
+    """
+    redfin_*.csv שירדו ל-Downloads ב-`days` הימים האחרונים מועתקים ל-data/redfin/,
+    ששם נשמרת ההיסטוריה השבועית (בעתיד: הורדות מחיר בין שבועות). מחזיר את כל
+    הקבצים, החדש קודם — כך שכפילות בין שבועות משאירה את המחיר וה-DOM העדכניים.
+    """
+    dst = os.path.join(sdf.DATA, "redfin")
+    os.makedirs(dst, exist_ok=True)
+    copied = 0
+    for f in glob.glob(os.path.expanduser("~/Downloads/redfin_*.csv")):
+        if time.time() - os.path.getmtime(f) < days * 86400 and not os.path.exists(os.path.join(dst, os.path.basename(f))):
+            shutil.copy2(f, dst)
+            copied += 1
+    return copied, sorted(glob.glob(os.path.join(dst, "redfin_*.csv")), reverse=True)
 
 
 # ─────────────────────────── מקור ב': RentCast ───────────────────────────
@@ -121,7 +144,7 @@ def _api_key():
     return key
 
 
-def read_rentcast(zips=sdf.BUY_BOX):
+def read_rentcast(zips=sdf.TARGET):
     """⚠️ לפי developers.rentcast.io/reference/sale-listings. לא הורץ — אין מפתח."""
     key, out = _api_key(), []
     for z in zips:
@@ -198,14 +221,21 @@ def score(L, band, reno, parcel):
 
 
 def underwrite(listings, dom_min=0, comps_for=None):
-    zips = sorted(set(sdf.TARGET) | {L["zip"] for L in listings if L["zip"] in KNOWN})
-    sales, loc = arv.market(zips=zips)
+    zips = set(sdf.TARGET)
+    sales, loc = arv.market()
     today = max(s["date"] for s in loc)
     cache = json.load(open(AV_CACHE, encoding="utf-8")) if os.path.exists(AV_CACHE) else {}
     rows, skipped = [], Counter()
+    todo = [L for L in listings if L["zip"] in zips and L["price"] and L["lat"]
+            and (not dom_min or (L["dom"] or 0) >= dom_min)
+            and f"{L['address']}|{L['zip']}".upper() not in cache]
+    if todo:                                   # שווי שומה: 4 במקביל, ~0.5 שנייה למודעה
+        print(f"  שולף שווי שומה ל-{len(todo)} מודעות חדשות...", file=sys.stderr)
+        with ThreadPoolExecutor(4) as ex:
+            list(ex.map(lambda L: parcel_av(L["address"], L["zip"], cache), todo))
     for L in listings:
         if L["zip"] not in zips:
-            skipped["מחוץ ל-33 הזיפים המוכרים"] += 1
+            skipped["מחוץ ל-12 זיפי היעד"] += 1
             continue
         if dom_min and (L["dom"] or 0) < dom_min:
             skipped[f"DOM < {dom_min:.0f}"] += 1
@@ -295,6 +325,14 @@ def selftest():
         os.remove(f.name)
     assert len(rows) == 1, rows
     assert skipped["Condo/Co-op"] == 1 and skipped["PAST SALE"] == 1 and skipped["בלי קואורדינטות"] == 1, skipped
+    # שורת ההערה של Redfin (תא אחד) לא נספרת כלל
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8") as f3:
+        f3.write(head + "In accordance with local MLS rules, some MLS listings are not included in the download\n" + body.splitlines()[0] + "\n")
+    try:
+        rows3, skipped3 = read_redfin([f3.name])
+    finally:
+        os.remove(f3.name)
+    assert len(rows3) == 1 and not skipped3, (rows3, skipped3)
     L = rows[0]
     assert L["price"] == 289_900 and L["sqft"] == 1_442 and L["year"] == 1961 and L["dom"] == 112
     assert L["zip"] == "46236" and abs(L["lat"] - 39.902098) < 1e-6 and L["url"].startswith("https://")
@@ -334,7 +372,7 @@ def selftest():
 
 if __name__ == "__main__":
     args = sys.argv[1:]
-    if not args or args[0] in ("-h", "--help"):
+    if args and args[0] in ("-h", "--help"):
         sys.exit(__doc__)
     if args[0] == "selftest":
         selftest()
@@ -346,7 +384,11 @@ if __name__ == "__main__":
     else:
         paths = [a for a in args if a.lower().endswith(".csv")]
         if not paths:
-            sys.exit("שימוש: python3 listings.py <קבצי CSV של Redfin> [--dom 90] [--comps \"כתובת\"] [--all]  |  --rentcast")
+            copied, paths = collect_downloads()
+            print(f"  {copied} קבצים חדשים מ-Downloads · {len(paths)} קבצים ב-data/redfin/", file=sys.stderr)
+        if not paths:
+            sys.exit("אין קבצי redfin_*.csv — להוריד מ-Redfin (\"Download All\" בתחתית החיפוש) ל-Downloads ולהריץ שוב.\n"
+                     "שימוש: python3 listings.py [קבצים.csv] [--dom 30] [--comps \"כתובת\"] [--all]  |  --rentcast")
         listings, skipped = read_redfin(paths)
     rows, more, today = underwrite(listings, dom_min, comps_for)
     print_table(rows, skipped + more, today, "--all" in args)
