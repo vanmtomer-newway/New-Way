@@ -8,7 +8,7 @@
 כבר מצוירים — אין טעם לצייר אותם מחדש. מעליהם מונחות רק השכבות שאין בשום
 מפה: גבולות ה-BUY BOX, עסקאות המכר בפועל, והפליפים שזוהו.
 """
-import json, os, sys, zipfile, io, statistics as st
+import json, os, sys, statistics as st
 from collections import defaultdict, Counter
 from datetime import date
 from urllib.request import urlopen, Request
@@ -22,9 +22,9 @@ ZIP_GEO_URL = ("https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJ
 ZIP_GEO_CACHE = os.path.join(sdf.DATA, "in_zips.json")
 
 # הזיפים מטבלת המחקר — 8 ב-BUY BOX, השאר לרקע ולהשוואה
-WATCH = ["46250", "46220", "46234", "46227", "46205", "46256", "46260", "46203",
-         "46221", "46254", "46235", "46231", "46239", "46201", "46225", "46208",
-         "46240", "46259", "46216"]
+WATCH = ["46250", "46234", "46227", "46256", "46203", "46221", "46254", "46235",
+         "46231", "46239", "46201", "46225", "46208", "46259", "46216"]
+# 46220/46205/46260/46240 עברו ל-sdf.NORTH (6.9.2026)
 AVOID = ["46218", "46226", "46241", "46222", "46204", "46202"]
 
 # עוגני אוריינטציה מתוך docs/מחקר_גאוגרפי_אינדיאנפוליס.md
@@ -112,7 +112,7 @@ def county_polygons():
 BLUE_LINE = [[39.7690, -86.2600], [39.7685, -86.2000], [39.7680, -86.1580],
              [39.7700, -86.1000], [39.7720, -86.0500], [39.7740, -86.0100]]
 
-RULE_70 = 0.70
+RULE = sdf.RULE
 
 
 def zip_polygons(wanted):
@@ -147,7 +147,7 @@ def zip_stats(sales, flips):
     for f in flips:
         fz[f["zip"]].append(f)
     out = {}
-    for z in sdf.BUY_BOX + WATCH + AVOID:
+    for z in sdf.TARGET + WATCH + AVOID:
         rows = [s for s in sales if s["zip"] == z]
         if not rows:
             continue
@@ -162,65 +162,23 @@ def zip_stats(sales, flips):
             "flips": len(f),
             "mult": round(st.median([x["mult"] for x in f]), 2) if f else None,
             "spread": round(st.median([x["sell"] - x["buy"] for x in f])) if f else None,
-            "tier": ("BUY" if z in sdf.BUY_BOX else "AVOID" if z in AVOID else "WATCH"),
+            "tier": ("BUY" if z in sdf.BUY_BOX else "NORTH" if z in sdf.NORTH
+                     else "AVOID" if z in AVOID else "WATCH"),
         }
     return out
 
 
-def title_companies(years=sdf.YEARS):
-    """מי סוגר את העסקאות בזיפי ה-BUY BOX. Contact_Type='P' הוא מכין הטופס."""
-    counts = Counter()
-    for year, path in sdf.files(years):
-        with zipfile.ZipFile(path) as zf:
-            names = {n.upper(): n for n in zf.namelist()}
-            keep = set()
-            parcels = defaultdict(list)
-            for p in sdf._rows(zf, names["SALEPARCEL.TXT"]):
-                if (p.get("A5_ZipCode") or "").strip()[:5] in sdf.BUY_BOX:
-                    parcels[(p.get("SDF_ID") or "").strip()].append(p)
-            for s in sdf._rows(zf, names["SALEDISC.TXT"]):
-                sid = (s.get("SDF_ID") or "").strip()
-                if sid in parcels and (s.get("County_ID") or "").strip() == "49":
-                    keep.add(sid)
-            for c in sdf._rows(zf, names["SALECONTAC.TXT"]):
-                if (c.get("Contact_Type") or "").strip() == "P" \
-                        and (c.get("SDF_ID") or "").strip() in keep:
-                    name = (c.get("Company") or "").strip()
-                    if name:
-                        counts[name] += 1
-    return counts.most_common(15)
+def title_companies(sales):
+    """מי סוגר את העסקאות. Contact_Type='P' הוא מכין הטופס — חברת הטייטל. פעם אחת לכל טופס."""
+    forms = {s["sid"]: s["title"] for s in sales if s["title"]}
+    return Counter(forms.values()).most_common(15)
 
 
 def active_buyers(sales, flips):
-    """
-    מי קונה כאן שוב ושוב. אלה המתחרים — ובחלקם גם מקורות עסקה.
-    שמות הקונים מגיעים מ-SALECONTAC (Contact_Type='B').
-    """
-    flip_ids = {(f["parcel"], f["buy_date"]) for f in flips}
-    counts, flip_counts = Counter(), Counter()
-    for year, path in sdf.files():
-        with zipfile.ZipFile(path) as zf:
-            names = {n.upper(): n for n in zf.namelist()}
-            parcels = {}
-            for p in sdf._rows(zf, names["SALEPARCEL.TXT"]):
-                if (p.get("A5_ZipCode") or "").strip()[:5] in sdf.BUY_BOX:
-                    parcels[(p.get("SDF_ID") or "").strip()] = \
-                        (p.get("A1_Parcel_Number") or "").strip()
-            dates = {}
-            for s in sdf._rows(zf, names["SALEDISC.TXT"]):
-                sid = (s.get("SDF_ID") or "").strip()
-                if sid in parcels and (s.get("County_ID") or "").strip() == "49":
-                    dates[sid] = (s.get("C7_Conveyance_Date") or "").strip()[:10]
-            for c in sdf._rows(zf, names["SALECONTAC.TXT"]):
-                sid = (c.get("SDF_ID") or "").strip()
-                if (c.get("Contact_Type") or "").strip() != "B" or sid not in dates:
-                    continue
-                name = (c.get("Name") or "").strip()
-                if not name or len(name) < 4:
-                    continue
-                counts[name] += 1
-                if (parcels[sid], dates[sid]) in flip_ids:
-                    flip_counts[name] += 1
+    """מי קונה כאן שוב ושוב. אלה המתחרים — ובחלקם גם מקורות עסקה. שמות מנורמלים (sdf._norm_name)."""
+    forms = {s["sid"]: s["buyer"] for s in sales if len(s["buyer"]) >= 4}
+    counts = Counter(forms.values())
+    flip_counts = Counter(f["flipper"] for f in flips if f["flipper"])
     return [(n, c, flip_counts.get(n, 0)) for n, c in counts.most_common(40) if c >= 4][:20]
 
 
@@ -269,11 +227,11 @@ def rival_inventory(sales):
 def build():
     print("טוען נתונים...", file=sys.stderr)
     # כל 33 הזיפים מטבלת המחקר — לסטטיסטיקה ולגבולות, כדי שיהיה מול מה להשוות
-    every = sdf.load(zips=sdf.BUY_BOX + WATCH + AVOID)
+    every = sdf.load(zips=sdf.TARGET + WATCH + AVOID)
     stats = zip_stats(every, sdf.find_flips(every))
     polys = zip_polygons(set(stats))
     # נקודות על המפה רק ל-BUY BOX — אין טעם לגאוקד זיפים שלא קונים בהם
-    sales = [s for s in every if s["zip"] in sdf.BUY_BOX]
+    sales = [s for s in every if s["zip"] in sdf.TARGET]
     flips = sdf.find_flips(sales)
     geo = sdf.geocode(sales)
 
@@ -291,7 +249,7 @@ def build():
             "a": f["address"][:44], "b": round(f["buy"]), "s": round(f["sell"]),
             "m": round(f["months"], 1), "x": round(f["mult"], 2),
             "d": f["date"][:7], "bd": f["buy_date"][:7],
-            "r": round(RULE_70 * f["sell"] - f["buy"]),   # תקציב שכלל ה-70% מתיר
+            "r": round(RULE * f["sell"] - f["buy"]),   # תקציב שכלל ההצעה מתיר
             "ds": 1 if f["buy_distress"] else 0,
             "oo": 1 if f["owner_occ"] else 0,
         })
@@ -308,7 +266,7 @@ def build():
     print("  מלאי חי של המתחרים...", file=sys.stderr)
     inventory = rival_inventory(every)
     print("  חברות טייטל...", file=sys.stderr)
-    titles = title_companies()
+    titles = title_companies(sales)
     print("  קונים חוזרים...", file=sys.stderr)
     buyers = active_buyers(sales, flips)
 
@@ -316,12 +274,13 @@ def build():
         "pts": pts, "bg": bg, "stats": stats, "polys": polys,
         "anchors": ANCHORS, "blueline": BLUE_LINE, "titles": titles,
         "counties": counties, "branches": BRANCHES, "inv": inventory,
-        "buyers": buyers, "buybox": sdf.BUY_BOX,
+        "buyers": buyers, "buybox": sdf.TARGET,
         "built": date.today().isoformat(),
         "years": [sdf.YEARS[0], sdf.YEARS[-1]],
         "geo_rate": round(len(pts) / max(len(flips), 1) * 100),
     }
-    html = TEMPLATE.replace("__DATA__", json.dumps(payload, ensure_ascii=False))
+    html = (TEMPLATE.replace("__DATA__", json.dumps(payload, ensure_ascii=False))
+            .replace("__RULE__", f"{sdf.RULE:.0%}"))
     with open(OUT, "w", encoding="utf-8") as f:
         f.write(html)
     mb = os.path.getsize(OUT) / 1e6
@@ -341,7 +300,7 @@ TEMPLATE = r"""<!DOCTYPE html>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
 :root{--bg:#0f1216;--panel:#171b21;--line:#262d36;--txt:#e6e9ee;--dim:#8b97a8;
-      --buy:#22c55e;--watch:#eab308;--avoid:#ef4444;--acc:#38bdf8}
+      --buy:#22c55e;--north:#2dd4bf;--watch:#eab308;--avoid:#ef4444;--acc:#38bdf8}
 *{box-sizing:border-box}
 body{margin:0;font:13px/1.5 -apple-system,"Segoe UI",Arial;background:var(--bg);color:var(--txt);overflow:hidden}
 #map{position:absolute;inset:0 380px 0 0;background:#0f1216}
@@ -368,6 +327,7 @@ table{width:100%;border-collapse:collapse;font-size:11px}
 th,td{padding:4px 3px;text-align:right;border-bottom:1px solid var(--line)}
 th{color:var(--dim);font-weight:500;font-size:10px}
 tr.buy td:first-child{border-right:3px solid var(--buy);padding-right:5px}
+tr.north td:first-child{border-right:3px solid var(--north);padding-right:5px}
 tr.watch td:first-child{border-right:3px solid var(--watch);padding-right:5px}
 tr.avoid td:first-child{border-right:3px solid var(--avoid);padding-right:5px}
 tr:hover{background:#1e242c;cursor:pointer}
@@ -406,6 +366,7 @@ tr:hover{background:#1e242c;cursor:pointer}
   <label>זיפ</label>
   <select id="fz"><option value="">כל הזיפים</option>
     <optgroup label="BUY BOX" id="gbuy"></optgroup>
+    <optgroup label="BUY BOX צפון" id="gnorth"></optgroup>
     <optgroup label="WATCH" id="gwatch"></optgroup>
     <optgroup label="AVOID" id="gavoid"></optgroup></select>
 
@@ -413,7 +374,7 @@ tr:hover{background:#1e242c;cursor:pointer}
   <input type="range" id="fmax" min="80" max="600" step="10" value="600">
   <label>מרווח גולמי מינימלי <b id="lspr"></b></label>
   <input type="range" id="fspr" min="0" max="150" step="5" value="0">
-  <label>תקציב שכלל ה-70% מתיר, מינימום <b id="lroom"></b></label>
+  <label>תקציב שכלל ה-__RULE__ מתיר, מינימום <b id="lroom"></b></label>
   <input type="range" id="froom" min="-50" max="150" step="5" value="-50">
   <label>חודשי החזקה עד <b id="lmon"></b></label>
   <input type="range" id="fmon" min="1" max="18" step="1" value="18">
@@ -456,8 +417,8 @@ tr:hover{background:#1e242c;cursor:pointer}
   שכבת המפה מתחת היא המקור המדויק.</span><br><br>
   <span class="warn">⚠️ "פליפ" = אותו parcel נמכר פעמיים תוך 18 ח' עם עלייה מעל 10%.
   חלקם עשויים להיות העברות בין ישויות ולא שיפוצים.</span><br><br>
-  <span class="warn">⚠️ אין שטח בנוי בנתונים ⇒ אין $/sqft. "תקציב שכלל ה-70% מתיר"
-  הוא <code>0.70 × מחיר מכירה − מחיר קנייה</code>: כמה נשאר לשיפוץ ולרווח אם
+  <span class="warn">⚠️ אין שטח בנוי בנתונים ⇒ אין $/sqft. "תקציב שכלל ה-__RULE__ מתיר"
+  הוא <code>__RULE__ × מחיר מכירה − מחיר קנייה</code>: כמה נשאר לשיפוץ ולרווח אם
   מתייחסים למכירה בפועל כ-ARV.</span>
   </div>
 </div>
@@ -471,7 +432,7 @@ L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
 
 const $ = id => document.getElementById(id);
 const usd = n => '$' + Math.round(n).toLocaleString('en-US');
-const TIER = {BUY:'#22c55e', WATCH:'#eab308', AVOID:'#ef4444'};
+const TIER = {BUY:'#22c55e', NORTH:'#2dd4bf', WATCH:'#eab308', AVOID:'#ef4444'};
 
 $('hdr').textContent = `רישומי מכר ${D.years[0]}–${D.years[1]} · נבנה ${D.built} · `
   + `${D.pts.length.toLocaleString()} פליפים ממופים`;
@@ -481,7 +442,7 @@ const zLayer = L.geoJSON(
   {type:'FeatureCollection', features:D.polys.map(p=>({type:'Feature',
      properties:{zip:p.zip}, geometry:p.geometry}))},
   {style:f=>{const t=(D.stats[f.properties.zip]||{}).tier||'WATCH';
-     const buy = t==='BUY';
+     const buy = t==='BUY'||t==='NORTH';
      return {color:TIER[t], weight:buy?2.5:1, opacity:buy?.95:.35,
              fillColor:TIER[t], fillOpacity:buy?.10:.03};},
    onEachFeature:(f,l)=>{const z=f.properties.zip,s=D.stats[z]||{};
@@ -589,7 +550,7 @@ function draw(){
        <div class="pop-row"><span class="pk">מרווח גולמי</span><span class="pv" style="color:${colorFor(p)}">${usd(spread)}</span></div>
        <div class="pop-row"><span class="pk">מכפיל</span><span class="pv">${p.x}×</span></div>
        <div class="pop-row"><span class="pk">החזקה</span><span class="pv">${p.m} ח'</span></div>
-       <div class="pop-row"><span class="pk">כלל ה-70% מתיר</span><span class="pv" style="color:${p.r>=52000?'#22c55e':p.r>0?'#eab308':'#ef4444'}">${usd(p.r)}</span></div>
+       <div class="pop-row"><span class="pk">כלל ה-__RULE__ מתיר</span><span class="pv" style="color:${p.r>=52000?'#22c55e':p.r>0?'#eab308':'#ef4444'}">${usd(p.r)}</span></div>
        ${p.ds?'<div class="pk">🔨 נרכש בעסקת מצוקה</div>':''}
        ${p.oo?'<div class="pk">🏠 נמכר לקונה תופס</div>':'<div class="pk">💼 נמכר למשקיע</div>'}`)
      .addTo(ptLayer);
@@ -602,7 +563,7 @@ function draw(){
     `<div class="stat"><span>פליפים מוצגים</span><b>${sel.length.toLocaleString()}</b></div>
      <div class="stat"><span>מרווח גולמי חציוני</span><b>${usd(med)}</b></div>
      <div class="stat"><span>חציון החזקה</span><b>${sel.length?(sel.reduce((a,p)=>a+p.m,0)/sel.length).toFixed(1):0} ח'</b></div>
-     <div class="stat"><span>עברו את כלל ה-70% בתקציב $52K</span><b>${pass} (${sel.length?Math.round(pass/sel.length*100):0}%)</b></div>`;
+     <div class="stat"><span>עברו את כלל ה-__RULE__ בתקציב $52K</span><b>${pass} (${sel.length?Math.round(pass/sel.length*100):0}%)</b></div>`;
 
   if($('fbg').checked){
     if(!map.hasLayer(bgLayer)){
@@ -630,7 +591,7 @@ function reset(){
 
 /* --- טבלאות --- */
 const order = Object.entries(D.stats).sort((a,b)=>
-  ({BUY:0,WATCH:1,AVOID:2})[a[1].tier]-({BUY:0,WATCH:1,AVOID:2})[b[1].tier]
+  ({BUY:0,NORTH:1,WATCH:2,AVOID:3})[a[1].tier]-({BUY:0,NORTH:1,WATCH:2,AVOID:3})[b[1].tier]
   || (b[1].mult||0)-(a[1].mult||0));
 $('tbl').innerHTML = order.map(([z,s])=>
   `<tr class="${s.tier.toLowerCase()}" onclick="$('fz').value='${z}';draw();zoomTo('${z}')">
@@ -638,7 +599,7 @@ $('tbl').innerHTML = order.map(([z,s])=>
     <td>${s.owner}%</td><td>${s.flips}</td><td>${s.mult??'—'}</td></tr>`).join('');
 order.forEach(([z,s])=>{
   const o=document.createElement('option'); o.value=z; o.textContent=`${z} — ${usd(s.median)}`;
-  $({BUY:'gbuy',WATCH:'gwatch',AVOID:'gavoid'}[s.tier]).appendChild(o);
+  $({BUY:'gbuy',NORTH:'gnorth',WATCH:'gwatch',AVOID:'gavoid'}[s.tier]).appendChild(o);
 });
 window.zoomTo = z => { zLayer.eachLayer(l=>{ if(l.feature.properties.zip===z)
   map.fitBounds(l.getBounds(),{paddingBottomRight:[380,0]}); }); };

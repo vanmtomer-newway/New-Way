@@ -6,9 +6,10 @@
 
 למה קומפס ולא מכפיל: נבדק מחוץ למדגם (כיול 2023-24, מבחן 2025-26) שכל מכפיל
 ברמת זיפ נכשל — AV×מכפיל 21.8% שגיאה, חציון מחיר הזיפ 21.3%, מחיר קנייה×מכפיל
-17.3%. קומפס גאוגרפיים: 12.6%. ראה `decisions.md` (6.9.2026) ו-`arv.py backtest`.
+17.3%. קומפס גאוגרפיים: 12.4% ב-BUY BOX, **18.7% בשכבה הצפונית** — הטווח נקבע לפי
+השכבה של הזיפ. ראה `decisions.md` (6.9.2026) ו-`arv.py backtest`.
 
-🔴 ולכן המוצר הוא טווח, לא מספר. 12.6% על ARV של $301K הם $38K — יותר ממחצית
+🔴 ולכן המוצר הוא טווח, לא מספר. 12.4% על ARV של $301K הם $37K — יותר ממחצית
 הרווח בעסקת הדוגמה. מי שקורא מכאן מספר בודד ומכניס אותו למודל, מרמה את עצמו.
 
     python3 arv.py comps 490101100001000001     # קומפס + טווח ARV
@@ -18,8 +19,9 @@
     python3 arv.py backtest                     # מייצר מחדש את טבלת הדיוק
     python3 arv.py selftest
 """
-import math, statistics as st, sys
+import csv, math, os, statistics as st, sys
 from collections import defaultdict
+from datetime import date
 
 import sdf
 
@@ -28,12 +30,18 @@ K_COMPS    = 10       # כמה קומפס. 5 נותן 13.6%, 10 עם סינון 
 COMP_MONTHS = 12      # כמה אחורה. מעבר לזה הקומפ כבר לא מתמחר את השוק הנוכחי
 AV_BAND    = 0.223    # ln(1.25) — שווי שומה ±25%, פרוקסי לגודל ואיכות
 
-# ── דיוק מדוד. 🔧 להריץ `arv.py backtest` אחרי עדכון נתונים ולכייל ──────
-ERR_P50 = 0.126       # שגיאה חציונית מוחלטת בחיזוי מחיר המכירה
-ERR_P90 = 0.429
+# ── דיוק מדוד, לפי שכבה: (שגיאה חציונית, p90). 🔧 `arv.py backtest` אחרי עדכון נתונים ──
+ERR = {"BUY":   (0.124, 0.429),   # BUY BOX, 8 זיפים, n=540
+       "NORTH": (0.187, 0.574)}   # שכבה צפונית, n=284 — מלאי הטרוגני ותוספות בנייה. הטווח שם רחב ב-50%
+
+
+def err_for(zip5):
+    """מחוץ ל-BUY BOX — הערכים השמרניים של הצפון."""
+    return ERR["BUY"] if zip5 in sdf.BUY_BOX else ERR["NORTH"]
 
 # ── פ"ל של עסקת מזומן. מקור: `CLAUDE.md` § "העסקה לדוגמה — 46236 Geist" ──
-RULE          = 0.70      # כלל ה-70%
+RULE          = sdf.RULE  # כלל ההצעה (72% — ראה sdf.py)
+LOG           = os.path.join(os.path.dirname(os.path.abspath(__file__)), "underwriting_log.csv")
 BUY_CLOSE     = 3_865     # טייטל $2,000 + בדיקה $900 + רישום $65 + היתרים $900. קבוע, לא אחוז (Excel B20:B23)
 EXIT_PCT      = 0.0825    # 8.25% מה-ARV — תיווך + הטבות + סגירה
 HOLD_MONTH    = 763       # $5,449 על 7.14 חודשים
@@ -57,7 +65,7 @@ def _km(a, b):
     return math.hypot((a[0] - b[0]) * 111.0, (a[1] - b[1]) * 85.0)
 
 
-def market(years=sdf.YEARS, zips=sdf.BUY_BOX):
+def market(years=sdf.YEARS, zips=sdf.TARGET):
     """כל המכירות עם קואורדינטות, ממוינות לפי תאריך (לחיתוך חלון מהיר)."""
     sales = sdf.load(years, zips)
     sdf.stamp(sales)
@@ -85,19 +93,20 @@ def find_comps(loc, ll, before, av=0, k=K_COMPS, months=COMP_MONTHS,
     return sorted(pool, key=lambda s: _km(ll, s["ll"]))[:k]
 
 
-def arv_band(comps):
+def arv_band(comps, zip5=""):
     """
-    נקודת האומדן היא חציון הקומפס. הטווח נגזר מ**שגיאת החיזוי שנמדדה**,
-    לא מפיזור הקומפס עצמם — כי זה מה שה-backtest אימת בפועל.
+    נקודת האומדן היא חציון הקומפס. הטווח נגזר מ**שגיאת החיזוי שנמדדה** לשכבה
+    של הזיפ, לא מפיזור הקומפס עצמם — כי זה מה שה-backtest אימת בפועל.
     """
     if not comps:
         return None
     px = sorted(c["price"] for c in comps)
     mid = st.median(px)
+    p50, p90 = err_for(zip5)
     return {
-        "arv": mid,
-        "low": mid * (1 - ERR_P50), "high": mid * (1 + ERR_P50),
-        "worst": mid * (1 - ERR_P90),
+        "arv": mid, "p50": p50, "p90": p90,
+        "low": mid * (1 - p50), "high": mid * (1 + p50),
+        "worst": mid * (1 - p90),
         "comp_p25": px[len(px) // 4], "comp_p75": px[3 * len(px) // 4],
         "n": len(comps),
     }
@@ -109,7 +118,7 @@ def deal(arv, offer, reno=RENO_DEFAULT, months=MONTHS_DEFAULT):
     exit_costs = arv * EXIT_PCT
     profit = arv - exit_costs - basis
     return {"arv": arv, "basis": basis, "exit": exit_costs, "profit": profit,
-            "roc": profit / basis, "offer_70": RULE * arv - reno}
+            "roc": profit / basis, "offer_rule": RULE * arv - reno}
 
 
 # ─────────────────────────── פקודות ───────────────────────────
@@ -126,15 +135,15 @@ def _resolve(sales, loc, query):
                 "address": s["address"], "parcel": s["parcel"],
                 "note": f"נמצא בנתונים · מכירה אחרונה {s['date']} ב-${s['price']:,.0f}"}
     sys.exit(f"⚠️ '{query}' לא נמצא ב-{len(sales):,} המכירות.\n"
-             "   כרגע נתמכים רק נכסים שנמכרו ב-2023-2026 בזיפי ה-BUY BOX.\n"
-             "   למודעה חיה צריך כתובת + קואורדינטות — ראה `tasks/todo.md` פאזה 2.")
+             "   כאן נתמכים רק נכסים שנמכרו ב-2023-2026 בזיפי היעד.\n"
+             "   למודעה חיה: python3 listings.py <CSV של Redfin> --comps \"<כתובת>\"")
 
 
 def cmd_comps(sales, loc, args):
     subj = _resolve(sales, loc, args[0])
     today = max(s["date"] for s in loc)
     cs = find_comps(loc, subj["ll"], today, subj["av"], exclude=subj["parcel"])
-    b = arv_band(cs)
+    b = arv_band(cs, subj["zip"])
     print(f"\n▌ {subj['address']}  ·  {subj['zip']}  ·  שווי שומה ${subj['av']:,}")
     print(f"  {subj['note']}\n")
     if not b:
@@ -149,8 +158,8 @@ def cmd_comps(sales, loc, args):
 def _print_band(b):
     print(f"\n{'─'*66}")
     print(f"אומדן ARV (חציון {b['n']} קומפס):        ${b['arv']:>11,.0f}")
-    print(f"טווח סביר   ±12.6% (שגיאה חציונית): ${b['low']:>11,.0f} – ${b['high']:,.0f}")
-    print(f"תרחיש p90   −42.9%:                 ${b['worst']:>11,.0f}")
+    print(f"טווח סביר   ±{b['p50']:.1%} (שגיאה חציונית): ${b['low']:>11,.0f} – ${b['high']:,.0f}")
+    print(f"תרחיש p90   −{b['p90']:.1%}:                 ${b['worst']:>11,.0f}")
     print(f"רבעוני הקומפס עצמם:                 ${b['comp_p25']:>11,.0f} – ${b['comp_p75']:,.0f}")
     print("🔴 האומדן אינו מספר. חתום על הטווח התחתון.")
 
@@ -167,7 +176,7 @@ def cmd_deal(sales, loc, args):
     subj = _resolve(sales, loc, query)
     today = max(s["date"] for s in loc)
     b = arv_band(find_comps(loc, subj["ll"], today, subj["av"],
-                            exclude=subj["parcel"]))
+                            exclude=subj["parcel"]), subj["zip"])
     if not b:
         return print("אין קומפס — אי אפשר לחתום.")
     print(f"\n▌ {subj['address']}  ·  {subj['zip']}")
@@ -175,19 +184,37 @@ def cmd_deal(sales, loc, args):
 
     if offer is None:
         offer = RULE * b["arv"] - reno
-        print(f"\nלא ניתנה הצעה — משתמש בכלל ה-70% על האומדן: ${offer:,.0f}")
+        print(f"\nלא ניתנה הצעה — משתמש בכלל ה-{RULE:.0%} על האומדן: ${offer:,.0f}")
     print(f"\n{'─'*66}\nטווח הרווח — מזומן מלא · שיפוץ ${reno:,.0f} ({how}) · {months} ח' החזקה")
     print(f"הצעה ${offer:,.0f}\n")
-    print(f"{'תרחיש ARV':<22}{'ARV':>11}{'בסיס':>11}{'רווח':>11}{'על העלות':>11}{'70% מתיר':>11}")
-    for lbl, arv in (("p90 שלילי  −42.9%", b["worst"]), ("תחתון  −12.6%", b["low"]),
-                     ("אומדן", b["arv"]), ("עליון  +12.6%", b["high"])):
+    print(f"{'תרחיש ARV':<22}{'ARV':>11}{'בסיס':>11}{'רווח':>11}{'על העלות':>11}{format(RULE, '.0%') + ' מתיר':>11}")
+    for lbl, arv in ((f"p90 שלילי  −{b['p90']:.1%}", b["worst"]), (f"תחתון  −{b['p50']:.1%}", b["low"]),
+                     ("אומדן", b["arv"]), (f"עליון  +{b['p50']:.1%}", b["high"])):
         d = deal(arv, offer, reno, months)
         flag = "" if d["profit"] > 0 else "  ❌"
         print(f"{lbl:<22}{d['arv']:>11,.0f}{d['basis']:>11,.0f}"
-              f"{d['profit']:>11,.0f}{d['roc']:>10.1%}{d['offer_70']:>11,.0f}{flag}")
+              f"{d['profit']:>11,.0f}{d['roc']:>10.1%}{d['offer_rule']:>11,.0f}{flag}")
     d = deal(b["low"], offer, reno, months)
     print(f"\n👉 בתרחיש התחתון הרווח הוא ${d['profit']:,.0f}. "
           f"{'זו העסקה.' if d['profit'] > 0 else '🔴 העסקה מפסידה בתרחיש התחתון.'}")
+    _log(subj, b, offer, reno, how, months, d, deal(b["arv"], offer, reno, months))
+
+
+def _log(subj, b, offer, reno, how, months, low, mid):
+    """
+    כל הרצת deal נרשמת ב-underwriting_log.csv (בריפו). ה-backtest מודד את השיטה
+    על פליפים של אחרים; זה הסט היחיד שימדוד אותה על שלך. את עמודת outcome ממלאים ביד.
+    """
+    new = not os.path.exists(LOG)
+    with open(LOG, "a", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        if new:
+            w.writerow(["date", "address", "zip", "parcel", "comps", "arv", "arv_low", "offer", "reno",
+                        "reno_basis", "months", "profit_low", "profit_mid", "verdict", "outcome"])
+        w.writerow([date.today().isoformat(), subj["address"], subj["zip"], subj["parcel"], b["n"],
+                    round(b["arv"]), round(b["low"]), round(offer), round(reno), how, months,
+                    round(low["profit"]), round(mid["profit"]), "pass" if low["profit"] > 0 else "fail", ""])
+    print(f"   נרשם ב-{os.path.basename(LOG)}")
 
 
 def _arg(args, flag):
@@ -210,12 +237,12 @@ def cmd_backtest(sales, loc, args):
     print("שגיאה = |חיזוי − מחיר מכירה בפועל| ÷ מחיר מכירה בפועל\n")
 
     mult = {z: st.median([f["sell"] / a for a, f in tr if f["zip"] == z] or [1])
-            for z in sdf.BUY_BOX}
+            for z in sdf.TARGET}
     medpx = {z: st.median([s["price"] for s in sales
                            if s["zip"] == z and s["date"] < CUT] or [1])
-             for z in sdf.BUY_BOX}
+             for z in sdf.TARGET}
     bmult = {z: st.median([f["sell"] / f["buy"] for a, f in tr if f["zip"] == z] or [1])
-             for z in sdf.BUY_BOX}
+             for z in sdf.TARGET}
 
     def score(fn):
         e = sorted(x for x in (fn(a, f) for a, f in te) if x is not None)
@@ -241,11 +268,16 @@ def cmd_backtest(sales, loc, args):
         m, p90, n = score(fn)
         print(f"{lbl:<24}{m:>10.1%}{p90:>9.1%}{n:>7,}")
         best = (m, p90)
-    print(f"\nהקבועים בקובץ: ERR_P50={ERR_P50:.1%} · ERR_P90={ERR_P90:.1%}")
-    if abs(best[0] - ERR_P50) > 0.015 or abs(best[1] - ERR_P90) > 0.03:
-        print(f"🔧 סטייה. לכייל ל-ERR_P50={best[0]:.3f} · ERR_P90={best[1]:.3f}")
-    else:
-        print("✅ הקבועים תואמים למדידה.")
+    print("\nלפי שכבה (השיטה הנבחרת) מול הקבועים בקובץ:")
+    for lbl, key, zz in (("BUY BOX", "BUY", sdf.BUY_BOX), ("שכבה צפונית", "NORTH", sdf.NORTH)):
+        e = sorted(x for x in (comp_pred(a, f, K_COMPS, AV_BAND) for a, f in te if f["zip"] in zz)
+                   if x is not None)
+        if not e:
+            continue
+        m, p90 = st.median(e), e[int(len(e) * .9)]
+        ok = abs(m - ERR[key][0]) <= 0.015 and abs(p90 - ERR[key][1]) <= 0.03
+        print(f"   {lbl}: חציונית {m:.1%} · p90 {p90:.1%} · n {len(e)}   "
+              f"{'✅ תואם' if ok else f'🔧 לכייל ל-({m:.3f}, {p90:.3f})'}")
 
 
 def selftest():
@@ -256,7 +288,8 @@ def selftest():
     # פ"ל: משחזר את עסקת הדוגמה מ-CLAUDE.md § 46236 Geist, מזומן מלא
     d = deal(301_000, 158_284, 52_416, 7.14)
     assert abs(d["basis"] - 220_010) < 50, d["basis"]      # התיעוד: $220,014
-    assert abs(d["offer_70"] - 158_284) < 1, d["offer_70"]  # התיעוד: $158,284
+    assert abs(d["offer_rule"] - (RULE * 301_000 - 52_416)) < 1, d["offer_rule"]
+    assert abs(deal(301_000, 0)["offer_rule"] - (0.70 * 301_000 - 52_416) - 0.02 * 301_000) < 1   # 72% = 70% + $6,020
     assert abs(d["profit"] - 56_158) < 50, d["profit"]
     # עלויות רכישה קבועות: הצעה כפולה לא מכפילה אותן (Excel B20:B23, לא אחוז)
     assert deal(301_000, 2 * 158_284)["basis"] - d["basis"] == 158_284
@@ -271,9 +304,12 @@ def selftest():
     assert abs((d["profit"] - lo["profit"]) / (301_000 * 0.126) - (1 - EXIT_PCT)) < 1e-9
 
     # הטווח נגזר מהשגיאה המדודה, ונקודת האומדן היא חציון הקומפס
-    b = arv_band([{"price": p, "ll": (0, 0)} for p in (200_000, 250_000, 300_000)])
+    b = arv_band([{"price": p, "ll": (0, 0)} for p in (200_000, 250_000, 300_000)], "46219")
     assert b["arv"] == 250_000 and b["n"] == 3
-    assert abs(b["low"] - 250_000 * (1 - ERR_P50)) < 1
+    assert abs(b["low"] - 250_000 * (1 - ERR["BUY"][0])) < 1
+    # הצפון מקבל טווח רחב יותר; זיפ לא מוכר מקבל את השמרני
+    bn = arv_band([{"price": p, "ll": (0, 0)} for p in (200_000, 250_000, 300_000)], "46220")
+    assert bn["low"] < b["low"] and bn["worst"] < b["worst"] and err_for("99999") == ERR["NORTH"]
 
     # קומפס: רק קונה תופס, רק לפני התאריך, רק בחלון, והנכס עצמו מוחרג
     loc = [

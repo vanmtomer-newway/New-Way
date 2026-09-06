@@ -23,6 +23,7 @@ def load_ext(years=sdf.YEARS, zips=sdf.BUY_BOX):
                     z = (p.get("A5_ZipCode") or "").strip()[:5]
                     if z not in zips: continue
                     out.append({"zip": z, "parcel": (p.get("A1_Parcel_Number") or "").strip(),
+                        "buyer": contacts.get((s.get("SDF_ID") or "").strip(), ["", ""])[0],
                         "date": (s.get("C7_Conveyance_Date") or "").strip()[:10], "price": price,
                         "dom": sdf._int(s.get("C8_Market_Days")), "owner_occ": sdf._yes(s, "J1_Primary_Residence"),
                         "distress": sdf._yes(s, "C1_Sheriff_Sale") or sdf._yes(s, "C2_Short_Sale") or sdf._yes(s, "C4_Auction"),
@@ -80,13 +81,8 @@ for lo, hi in [(0,200e3),(200e3,250e3),(250e3,300e3),(300e3,400e3),(400e3,9e9)]:
 
 # ── who captured the passing flips (buy-leg buyer name) ──
 print("\n=== who bought the passing flips (last 24 months, 33 zips) ===")
-buyers, titles = analyze._buyer_index(set(ALL)); ids = analyze._sale_ids(set(ALL))
 pas = [f for f in recent if passes(f)]
-names = Counter()
-for f in pas:
-    n = (buyers.get(ids.get((f["parcel"], f["buy_date"]))) or "?").upper()
-    n = " ".join(n.split()[:2])
-    names[n] += 1
+names = Counter(" ".join((f["flipper"] or "?").split()[:2]) for f in pas)
 top = names.most_common(15)
 print(f"{len(pas)} passing flips · distinct buyers {len(names)} · top-15 share {sum(c for _,c in top)/len(pas):.0%}")
 for n, c in top: print(f"   {c:>3}  {n}")

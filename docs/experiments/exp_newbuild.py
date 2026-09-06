@@ -9,9 +9,10 @@ tier = {z: ("BUY" if z in sdf.BUY_BOX else "AVOID" if z in dm.AVOID else "WATCH"
 
 def load_ext(zips):
     out = []
-    for year in sdf.YEARS:
-        with zipfile.ZipFile(sdf._fetch(year)) as zf:
+    for year, path in sdf.files():
+        with zipfile.ZipFile(path) as zf:
             names = {n.upper(): n for n in zf.namelist()}
+            contacts = sdf._contacts(zf, year)
             parcels = defaultdict(list)
             for p in sdf._rows(zf, names["SALEPARCEL.TXT"]):
                 parcels[(p.get("SDF_ID") or "").strip()].append(p)
@@ -24,6 +25,7 @@ def load_ext(zips):
                     z = (p.get("A5_ZipCode") or "").strip()[:5]
                     if z not in zips: continue
                     out.append({"zip": z, "parcel": (p.get("A1_Parcel_Number") or "").strip(),
+                        "buyer": contacts.get((s.get("SDF_ID") or "").strip(), ["", ""])[0],
                         "date": (s.get("C7_Conveyance_Date") or "").strip()[:10], "price": price,
                         "owner_occ": sdf._yes(s, "J1_Primary_Residence"),
                         "distress": sdf._yes(s, "C1_Sheriff_Sale") or sdf._yes(s, "C2_Short_Sale") or sdf._yes(s, "C4_Auction"),
@@ -85,9 +87,8 @@ for lo, hi in [(0,200e3),(200e3,250e3),(250e3,300e3),(300e3,400e3),(400e3,9e9)]:
     print(f"   ${lo/1e3:.0f}K–{hi/1e3:.0f}K  flips {len(g):<4} pass {len(p):<4} ({len(p)/max(1,len(g)):.0%})  {dict(Counter(tier[s['zip']] for b,s,m in p))}")
 
 print(f"\n{'zip':<7}{'tier':<7}{'real12m':>8}{'pass12m':>8}{'3-9mo':>7}{'pass24m':>8}{'med sell':>10}{'70% room':>10}  passing buyers (top)")
-buyers, _ = analyze._buyer_index(set(ALL)); ids = analyze._sale_ids(set(ALL))
-def bname(b): 
-    n = (buyers.get(ids.get((b["parcel"], b["date"]))) or "?").upper(); return " ".join(n.split()[:2]).strip(",")
+def bname(b):
+    return " ".join((b["buyer"] or "?").split()[:2])
 rows = []
 for z in ALL:
     g = [x for x in last12 if x[1]["zip"] == z]; p = [x for x in g if passes(x[0], x[1])]

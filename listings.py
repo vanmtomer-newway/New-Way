@@ -20,7 +20,7 @@
     python3 listings.py --rentcast                        # 8 זיפי ה-BUY BOX מ-RentCast
     python3 listings.py selftest
 
-הפלט ממוין לפי הפער בין המחיר המבוקש להצעת כלל ה-70%: פער קטן = עסקה קרובה.
+הפלט ממוין לפי הפער בין המחיר המבוקש להצעת כלל ההצעה (sdf.RULE): פער קטן = עסקה קרובה.
 שווי השומה לכל מודעה נשלף מרשומות השומה (xmaps) לפי מספר בית + רחוב, ונשמר
 במטמון. 🔴 חיפוש לפי נקודה נפסל: קואורדינטות מגאוקוד נוחתות על החלקה השכנה
 (6259 Chadworth החזיר את 6251 — נמדד 6.9.2026).
@@ -33,7 +33,7 @@ from urllib.request import urlopen, Request
 import sdf, arv, analyze
 
 _m = importlib.import_module("map")
-KNOWN = sdf.BUY_BOX + _m.WATCH + _m.AVOID
+KNOWN = sdf.TARGET + _m.WATCH + _m.AVOID
 AV_CACHE = os.path.join(sdf.DATA, "av_cache.json")
 RENTCAST_URL = "https://api.rentcast.io/v1/listings/sale"
 # מילים שמדלגים עליהן בתחילת שם הרחוב: כיוונים, ו-"St. Paul"/"Mt. Vernon" (ST כאן = Saint)
@@ -188,17 +188,17 @@ def parcel_av(address, zip5, cache):
 
 def score(L, band, reno, parcel):
     """כל המספרים של שורה אחת. פונקציה טהורה — זו שנבדקת ב-selftest."""
-    offer70 = arv.RULE * band["arv"] - reno
+    offer = arv.RULE * band["arv"] - reno
     return {**L, "arv": band["arv"], "low": band["low"], "n": band["n"], "reno": reno,
-            "offer70": offer70, "gap": (L["price"] - offer70) / L["price"],
-            "profit70": arv.deal(band["low"], offer70, reno)["profit"],
+            "offer_rule": offer, "gap": (L["price"] - offer) / L["price"],
+            "profit_rule": arv.deal(band["low"], offer, reno)["profit"],
             "profit_ask": arv.deal(band["low"], L["price"], reno)["profit"],
             "av": parcel.get("av", 0), "owner": parcel.get("owner", ""),
             "rrp": bool(L["year"] and L["year"] < 1978)}
 
 
 def underwrite(listings, dom_min=0, comps_for=None):
-    zips = sorted(set(sdf.BUY_BOX) | {L["zip"] for L in listings if L["zip"] in KNOWN})
+    zips = sorted(set(sdf.TARGET) | {L["zip"] for L in listings if L["zip"] in KNOWN})
     sales, loc = arv.market(zips=zips)
     today = max(s["date"] for s in loc)
     cache = json.load(open(AV_CACHE, encoding="utf-8")) if os.path.exists(AV_CACHE) else {}
@@ -215,7 +215,7 @@ def underwrite(listings, dom_min=0, comps_for=None):
             continue
         p = parcel_av(L["address"], L["zip"], cache)
         comps = arv.find_comps(loc, (L["lat"], L["lon"]), today, p.get("av", 0))
-        b = arv.arv_band(comps)
+        b = arv.arv_band(comps, L["zip"])
         if not b:
             skipped["בלי קומפס"] += 1
             continue
@@ -246,23 +246,24 @@ def _f(v, w, money=False):
 
 def print_table(rows, skipped, today, show_all=False):
     rows.sort(key=lambda r: r["gap"])
-    print(f"\n{len(rows)} מודעות נחתמו · נתוני מכר עד {today} · ממוין לפי הפער בין המבוקש להצעת כלל ה-70%")
+    R = f"{arv.RULE:.0%}"
+    print(f"\n{len(rows)} מודעות נחתמו · נתוני מכר עד {today} · ממוין לפי הפער בין המבוקש להצעת כלל ה-{R}")
     if skipped:
         print("דולגו: " + " · ".join(f"{k} {v}" for k, v in skipped.most_common()))
-    hdr = (f"{'ZIP':<7}{'מבוקש':>10}{'DOM':>5}{'sqft':>7}{'שנה':>6}{'ARV':>10}{'70% מתיר':>10}"
-           f"{'פער':>6}{'רווח@70%':>10}{'רווח@מבוקש':>12}{'שומה':>11}{'n':>3}  כתובת")
+    hdr = (f"{'ZIP':<7}{'מבוקש':>10}{'DOM':>5}{'sqft':>7}{'שנה':>6}{'ARV':>10}{R + ' מתיר':>10}"
+           f"{'פער':>6}{'רווח@' + R:>10}{'רווח@מבוקש':>12}{'שומה':>11}{'n':>3}  כתובת")
     print("\n" + hdr)
     print("-" * 106)
     for r in rows if show_all else rows[:40]:
         tag = (" ⚠️RRP" if r["rrp"] else "") + (f" ↓{r['cuts']}" if r.get("cuts") else "")
         print(f"{r['zip']:<7}{r['price']:>10,.0f}{_f(r['dom'], 5)}{_f(r['sqft'], 7)}{_f(r['year'], 6)}"
-              f"{r['arv']:>10,.0f}{r['offer70']:>10,.0f}{r['gap']:>6.0%}{r['profit70']:>10,.0f}"
+              f"{r['arv']:>10,.0f}{r['offer_rule']:>10,.0f}{r['gap']:>6.0%}{r['profit_rule']:>10,.0f}"
               f"{r['profit_ask']:>12,.0f}{_f(r['av'], 11)}{r['n']:>3}  {r['address'][:28]}{tag}")
     if not show_all and len(rows) > 40:
         print(f"... ועוד {len(rows) - 40}. --all להכל.")
     print(f"""
-פער      = כמה מתחת למבוקש צריך לקנות כדי לעמוד בכלל ה-70%. מתחת ל-15% על מודעה תקועה — יש שיחה.
-רווח     = תרחיש תחתון (ARV −{arv.ERR_P50:.1%}), מזומן מלא, {arv.MONTHS_DEFAULT} ח'. @70% = אם קונים בהצעת הכלל; @מבוקש = אם משלמים מחיר מלא.
+פער      = כמה מתחת למבוקש צריך לקנות כדי לעמוד בכלל ה-{R}. מתחת ל-15% על מודעה תקועה — יש שיחה.
+רווח     = תרחיש תחתון (ARV − לפי שכבה: BUY BOX {arv.ERR['BUY'][0]:.1%}, צפון {arv.ERR['NORTH'][0]:.1%}), מזומן מלא, {arv.MONTHS_DEFAULT} ח'. @{R} = בהצעת הכלל; @מבוקש = במחיר מלא.
 שיפוץ    = sqft × ${arv.RENO_SQFT} (+${arv.RENO_PRE78} לפני 1978, ⚠️RRP) × {1 + arv.RENO_RESERVE:.2f}. בלי sqft: ${arv.RENO_DEFAULT:,}.
 שומה '—' = לא נמצאה ברשומות השומה ⇒ קומפס בלי סינון גודל, טווח רחב יותר.
 🔴 ARV הוא חציון קומפס, לא מספר. לפני הצעה: --comps "<כתובת>" ולהסתכל בעיניים.""")
@@ -298,14 +299,14 @@ def selftest():
     assert L["price"] == 289_900 and L["sqft"] == 1_442 and L["year"] == 1961 and L["dom"] == 112
     assert L["zip"] == "46236" and abs(L["lat"] - 39.902098) < 1e-6 and L["url"].startswith("https://")
 
-    # ציון: הצעת 70% על האומדן, פער מהמבוקש, רווח בתרחיש התחתון
-    band = {"arv": 301_000, "low": 301_000 * (1 - arv.ERR_P50), "n": 10}
+    # ציון: הצעת הכלל על האומדן, פער מהמבוקש, רווח בתרחיש התחתון
+    band = {"arv": 301_000, "low": 301_000 * (1 - arv.ERR["BUY"][0]), "n": 10}
     reno = arv.reno_budget(L["sqft"], L["year"])
     assert abs(reno - 1_442 * 40 * 1.17) < 1              # לפני 1978 ⇒ $40/sqft
     s = score(L, band, reno, {"av": 297_200})
-    assert abs(s["offer70"] - (0.7 * 301_000 - reno)) < 1
-    assert abs(s["gap"] - (289_900 - s["offer70"]) / 289_900) < 1e-9
-    assert s["profit_ask"] < s["profit70"] and s["rrp"] and s["av"] == 297_200
+    assert abs(s["offer_rule"] - (arv.RULE * 301_000 - reno)) < 1
+    assert abs(s["gap"] - (289_900 - s["offer_rule"]) / 289_900) < 1e-9
+    assert s["profit_ask"] < s["profit_rule"] and s["rrp"] and s["av"] == 297_200
     # רחוב: מדלגים על קידומת כיוון; כתובת בלי מספר לא נשלחת לשרת
     assert _street("5302 N ARLINGTON AVE") == ("5302", "ARLINGTON")
     assert _street("8058 Cherrybark Dr.") == ("8058", "CHERRYBARK")

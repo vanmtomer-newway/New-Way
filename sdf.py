@@ -17,13 +17,20 @@ IC 6-1.1-5.5 מחייבת טופס גילוי עם המחיר בפועל בכל 
     python3 sdf.py refresh           # מוריד מחדש רק את השנה הנוכחית (~14MB)
     python3 sdf.py selftest          # בדיקה עצמית
 """
-import csv, io, os, sys, zipfile, statistics as st
+import csv, io, json, os, re, sys, zipfile, statistics as st
 from collections import defaultdict
 from datetime import date
 from urllib.request import urlopen, Request
 from urllib.error import HTTPError
 
 BUY_BOX = ["46236", "46217", "46228", "46224", "46229", "46237", "46219", "46107"]
+# שכבה צפונית — נוספה 6.9.2026 אחרי בדיקה עמוקה (docs/בדיקה_זיפים_צפוניים.md):
+# מדד מכירות חוזרות של אותו בית +3.5%-5.3% בשנה, זרימה של 17-54 פליפים עוברים ב-24 ח' לזיפ.
+# הסימון WATCH הקודם נשען על $/sqft של Redfin ברמת זיפ — תמהיל, לא שוק.
+NORTH = ["46220", "46205", "46260", "46240"]
+TARGET = BUY_BOX + NORTH                 # ברירת המחדל של כל הכלים
+RULE = 0.72   # כלל ההצעה: הצעה ≤ RULE×ARV − שיפוץ. 70% מכויל לקונה ממונף (מימון ~5.4% מה-ARV);
+              # במזומן חוזרות 2 נקודות ולא יותר — 12.6% שגיאת ARV צריכה את השאר. decisions.md 6.9.2026
 MARION_COUNTY_ID = "49"
 YEARS = list(range(2023, date.today().year + 1))   # מהלוח: בינואר נוספת שנה לבד
 FLIP_MAX_MONTHS = 18        # שתי מכירות רחוקות מזה — כבר לא פליפ
@@ -60,6 +67,43 @@ def files(years=YEARS):
             yield year, path
 
 
+def _norm_name(n):
+    """'Brooks Holdings, LLC' / 'BROOKS HOLDINGS LLC' -> 'BROOKS HOLDINGS'. אותו קונה, כתיב אחד."""
+    n = (n or "").upper().replace("L.L.C.", "LLC").replace("LIMITED LIABILITY COMPANY", "LLC")
+    n = re.sub(r"\b(AN?|THE)\s+(INDIANA|DELAWARE|OHIO|ILLINOIS|KENTUCKY|MICHIGAN|TEXAS|FLORIDA|NEVADA|WYOMING)\s+LLC\b.*$", "", n)
+    words = re.sub(r"[^\w\s&]", " ", n).split()
+    while words and words[-1] in ("LLC", "INC", "CORP", "LP", "LTD", "CO", "LLP"):
+        words.pop()
+    return " ".join(words)
+
+
+def _contacts(zf, year):
+    """
+    SDF_ID -> [קונה ראשון, חברת טייטל] למריון. SALECONTAC הוא UTF-16 וגדול,
+    ולכן התוצאה נשמרת ב-data/contacts_{year}.json ומתחדשת רק כשה-zip חדש יותר.
+    """
+    cache = os.path.join(DATA, f"contacts_{year}.json")
+    src = os.path.join(DATA, f"SDF_{year}.zip")
+    if os.path.exists(cache) and os.path.getmtime(cache) >= os.path.getmtime(src):
+        with open(cache, encoding="utf-8") as f:
+            return json.load(f)
+    names = {n.upper(): n for n in zf.namelist()}
+    out = {}
+    for c in _rows(zf, names["SALECONTAC.TXT"]):
+        sid = (c.get("SDF_ID") or "").strip()
+        if not sid.startswith(f"C{MARION_COUNTY_ID}-"):
+            continue
+        t = (c.get("Contact_Type") or "").strip()
+        rec = out.setdefault(sid, ["", ""])
+        if t == "B" and not rec[0]:
+            rec[0] = _norm_name(c.get("Name"))
+        elif t == "P" and not rec[1]:
+            rec[1] = (c.get("Company") or "").strip()
+    with open(cache, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False)
+    return out
+
+
 def _rows(zf, name):
     """SALEDISC הוא UTF-16, SALEPARCEL הוא UTF-8. שניהם מופרדי טאב."""
     raw = zf.read(name)
@@ -79,12 +123,13 @@ def _money(rec, key):
         return 0.0
 
 
-def load(years=YEARS, zips=BUY_BOX):
+def load(years=YEARS, zips=TARGET):
     """מחזיר מכירות מגורים במריון קאונטי בזיפים המבוקשים, שנה אחר שנה."""
     out = []
     for year, path in files(years):
         with zipfile.ZipFile(path) as zf:
             names = {n.upper(): n for n in zf.namelist()}
+            contacts = _contacts(zf, year)
             parcels = defaultdict(list)
             for p in _rows(zf, names["SALEPARCEL.TXT"]):
                 parcels[(p.get("SDF_ID") or "").strip()].append(p)
@@ -96,17 +141,20 @@ def load(years=YEARS, zips=BUY_BOX):
                 price = _money(s, "E1_Sales_Price")
                 if price < 10_000:           # $0, מתנות, העברות בין קרובים
                     continue
-                for p in parcels.get((s.get("SDF_ID") or "").strip(), []):
+                sid = (s.get("SDF_ID") or "").strip()
+                buyer, title = contacts.get(sid, ["", ""])
+                for p in parcels.get(sid, []):
                     z = (p.get("A5_ZipCode") or "").strip()[:5]
                     if z not in zips:
                         continue
                     out.append({
-                        "zip": z,
+                        "zip": z, "sid": sid, "buyer": buyer, "title": title,
                         "parcel": (p.get("A1_Parcel_Number") or "").strip(),
                         "date": (s.get("C7_Conveyance_Date") or "").strip()[:10],
                         "price": price,
                         "dom": _int(s.get("C8_Market_Days")),
                         "owner_occ": _yes(s, "J1_Primary_Residence"),
+                        "appr": _yes(s, "E9_Appraisal_Value"),   # בוצעה שמאות = קונה ממומן
                         "distress": _yes(s, "C1_Sheriff_Sale") or _yes(s, "C2_Short_Sale")
                                     or _yes(s, "C4_Auction"),
                         "av": _int(p.get("P2_5_Total_AV")),
@@ -166,7 +214,8 @@ def find_flips(sales):
             flips.append({**sell, "buy": buy["price"], "sell": sell["price"],
                           "months": gap, "mult": sell["price"] / buy["price"],
                           "buy_date": buy["date"], "buy_distress": buy["distress"],
-                          "buy_dom": buy["dom"]})
+                          "buy_dom": buy["dom"],
+                          "flipper": buy.get("buyer", ""), "title_in": buy.get("title", "")})
     return flips
 
 
@@ -187,7 +236,9 @@ def report(sales):
     print(f"נשלף: {date.today().isoformat()} · מקור: Indiana SDF (IC 6-1.1-5.5)\n")
     hdr = f"{'ZIP':<8}{'מכירות':>8}{'מדיאן':>11}{'DOM':>6}{'תופס':>7}{'מצוקה':>7}{'פליפים':>8}{'מכפיל':>8}{'רווח גולמי':>13}"
     print(hdr); print("-" * len(hdr.encode('utf-8').decode('utf-8')) )
-    for z in BUY_BOX:
+    for z in TARGET:
+        if z == NORTH[0]:
+            print("── שכבה צפונית ──")
         rows = [s for s in sales if s["zip"] == z]
         if not rows:
             continue
@@ -335,8 +386,8 @@ def selftest():
     assert abs(_months("2025-06-15", "2026-06-15") - 12) < 0.1
     # פליפ אמיתי נתפס; מכירה חוזרת אחרי שנתיים או בלי עלייה — לא
     base = {"zip": "46219", "dom": 0, "owner_occ": True, "distress": False, "av": 0,
-            "class": "510", "improved": True, "vacant": False, "newc": False,
-            "address": "", "city": "Indianapolis"}
+            "class": "510", "improved": True, "vacant": False, "newc": False, "appr": False,
+            "sid": "", "buyer": "BROOKS HOLDINGS", "title": "", "address": "", "city": "Indianapolis"}
     flips = find_flips([
         {**base, "parcel": "A", "date": "2025-01-10", "price": 100_000},
         {**base, "parcel": "A", "date": "2025-09-10", "price": 180_000},  # פליפ
@@ -347,6 +398,13 @@ def selftest():
     ])
     assert len(flips) == 1, flips
     assert flips[0]["parcel"] == "A" and abs(flips[0]["mult"] - 1.8) < 1e-9
+    assert flips[0]["flipper"] == "BROOKS HOLDINGS"          # הקונה ברגל הקנייה = הפליפר
+    assert _norm_name("Brooks Holdings, LLC") == _norm_name("BROOKS HOLDINGS LLC") == "BROOKS HOLDINGS"
+    assert _norm_name("Simple Quarters L.L.C.") == "SIMPLE QUARTERS" and _norm_name("R&J Investments") == "R&J INVESTMENTS"
+    assert _norm_name(None) == "" and _norm_name("EQUITY TRUST CO") == "EQUITY TRUST"
+    assert _norm_name("HPMC Real Estate LLC, an Indiana limited liability company") == "HPMC REAL ESTATE"
+    assert _norm_name("A Plus LLC") == "A PLUS"
+    assert len(TARGET) == 12 and set(NORTH) & set(BUY_BOX) == set() and 0.70 <= RULE <= 0.75
     # בנייה חדשה אינה פליפ: מגרש -> בית, או בית שסומן D1 (physical change) במכירה
     assert not find_flips([
         {**base, "parcel": "D", "date": "2025-01-10", "price": 60_000, "class": "500", "improved": False},

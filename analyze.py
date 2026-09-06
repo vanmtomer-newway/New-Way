@@ -2,11 +2,11 @@
 """
 שני ניתוחים שהמפה לא עונה עליהם:
 
-    python3 analyze.py filter     # למה כלל ה-70% תופס רק ~16%, ואיך מרחיבים
+    python3 analyze.py filter     # למה כלל ההצעה תופס רק ~19%, ואיך מרחיבים
     python3 analyze.py rivals     # המודל העסקי של המתחרים, מתוך רישומי המכר
     python3 analyze.py inventory  # המלאי החי — מה כל אחד מחזיק *עכשיו*
 """
-import json, os, sys, zipfile, statistics as st
+import json, os, sys, statistics as st
 from collections import defaultdict, Counter
 from urllib.parse import urlencode
 from urllib.request import urlopen, Request
@@ -26,8 +26,8 @@ LANDLORDS = {"AMERICAN INTERNATIONAL HOME"}
 
 def filter_analysis(sales, flips):
     """
-    כלל ה-70%:  הצעה ≤ 0.70·ARV − שיפוץ
-    ולכן:       מרווח = מכירה − קנייה ≥ 0.30·ARV + שיפוץ
+    כלל ההצעה (RULE, 72%):  הצעה ≤ RULE·ARV − שיפוץ
+    ולכן:                   מרווח = מכירה − קנייה ≥ (1−RULE)·ARV + שיפוץ
 
     זו כל התשובה. הכלל לא דורש "מרווח טוב" — הוא דורש מרווח שגדל
     עם מחיר המכירה. ככל שהנכס יקר יותר, הרף עולה בדולרים.
@@ -37,9 +37,14 @@ def filter_analysis(sales, flips):
     print(f"\n{'='*74}\nלמה המסנן צר\n{'='*74}")
     print(f"\nמכירה חציונית בפליפים שנמדדו:   ${S:,.0f}")
     print(f"מרווח גולמי חציוני:             ${spread:,.0f}  ({spread/S*100:.0f}% מהמכירה)")
-    print(f"\nכלל ה-70% בתקציב שיפוץ $52,416 דורש:")
-    print(f"   מרווח ≥ 0.30 × ${S:,.0f} + $52,416 = ${0.30*S + 52416:,.0f}")
-    print(f"   👉 פי {(0.30*S + 52416)/spread:.2f} מהמרווח החציוני בשוק.")
+    R = sdf.RULE
+    print(f"\nכלל ה-{R:.0%} בתקציב שיפוץ $52,416 דורש:")
+    print(f"   מרווח ≥ {1-R:.2f} × ${S:,.0f} + $52,416 = ${(1-R)*S + 52416:,.0f}")
+    print(f"   👉 פי {((1-R)*S + 52416)/spread:.2f} מהמרווח החציוני בשוק.")
+    for lbl, zz in (("BUY BOX", sdf.BUY_BOX), ("שכבה צפונית", sdf.NORTH)):
+        g = [f for f in flips if f["zip"] in zz]
+        if g:
+            print(f"   {lbl}: {len(g):,} פליפים, עוברים {sum(R*f['sell']-f['buy'] >= 52_416 for f in g)/len(g):.0%}")
     print(f"\nכלומר הכלל לא 'מחמיר' — הוא מכייל לשוק עם מרווחים רחבים יותר.")
 
     print(f"\n{'-'*74}\nרגישות: אחוז מ-{len(flips):,} הפליפים שהיו עוברים\n{'-'*74}")
@@ -61,14 +66,14 @@ def filter_analysis(sales, flips):
         grp = [f for f in flips if lo < f["months"] <= hi]
         if len(grp) < 20:
             continue
-        pas = sum(1 for g in grp if 0.70 * g["sell"] - g["buy"] >= 52_416) / len(grp) * 100
+        pas = sum(1 for g in grp if sdf.RULE * g["sell"] - g["buy"] >= 52_416) / len(grp) * 100
         oo = sum(1 for g in grp if g["owner_occ"]) / len(grp) * 100
         print(f"{lbl:>26}{len(grp):>7,}"
               f"{st.median([g['sell']-g['buy'] for g in grp]):>11,.0f}"
               f"{st.median([g['mult'] for g in grp]):>8.2f}{oo:>10.0f}%{pas:>7.0f}%")
-    p_all = sum(1 for f in flips if 0.70 * f["sell"] - f["buy"] >= 52_416) / len(flips) * 100
+    p_all = sum(1 for f in flips if sdf.RULE * f["sell"] - f["buy"] >= 52_416) / len(flips) * 100
     nw = [f for f in flips if f["months"] > 2]
-    p_nw = sum(1 for f in nw if 0.70 * f["sell"] - f["buy"] >= 52_416) / len(nw) * 100
+    p_nw = sum(1 for f in nw if sdf.RULE * f["sell"] - f["buy"] >= 52_416) / len(nw) * 100
     print(f"\nהוצאת ה-wholesale מעלה את שיעור המעבר מ-{p_all:.0f}% ל-{p_nw:.0f}% בלבד.")
     print("זה מסביר חלק מהפער, לא את כולו. מדרגת המחיר מסבירה יותר — ראה למטה.")
 
@@ -83,96 +88,47 @@ def filter_analysis(sales, flips):
     print(f"\n{'-'*74}\nלפי מדרגת מחיר מכירה\n{'-'*74}")
     bands = [(0, 150_000), (150_000, 200_000), (200_000, 250_000),
              (250_000, 300_000), (300_000, 400_000), (400_000, 10**9)]
-    print(f"{'מדרגה':>20}{'n':>7}{'מרווח חציוני':>15}{'עובר 70%/$52K':>16}")
+    print(f"{'מדרגה':>20}{'n':>7}{'מרווח חציוני':>15}{'עובר ' + format(sdf.RULE, '.0%') + '/$52K':>16}")
     for lo, hi in bands:
         grp = [f for f in flips if lo <= f["sell"] < hi]
         if len(grp) < 10:
             continue
         sp = st.median([g["sell"] - g["buy"] for g in grp])
-        pas = sum(1 for g in grp if 0.70 * g["sell"] - g["buy"] >= 52_416) / len(grp) * 100
+        pas = sum(1 for g in grp if sdf.RULE * g["sell"] - g["buy"] >= 52_416) / len(grp) * 100
         lbl = f"${lo//1000}K–{hi//1000}K" if hi < 10**9 else f"${lo//1000}K+"
         print(f"{lbl:>20}{len(grp):>7,}{sp:>15,.0f}{pas:>15.0f}%")
 
 
 # ─────────────────────────── ניתוח 2: המתחרים ───────────────────────────
 
-def _buyer_index(zips):
-    """SDF_ID -> (שם קונה, חברת טייטל) עבור כל העסקאות בזיפים המבוקשים."""
-    buyers, titles = {}, {}
-    for year, path in sdf.files():
-        with zipfile.ZipFile(path) as zf:
-            names = {n.upper(): n for n in zf.namelist()}
-            keep = set()
-            for p in sdf._rows(zf, names["SALEPARCEL.TXT"]):
-                if (p.get("A5_ZipCode") or "").strip()[:5] in zips:
-                    keep.add((p.get("SDF_ID") or "").strip())
-            for c in sdf._rows(zf, names["SALECONTAC.TXT"]):
-                sid = (c.get("SDF_ID") or "").strip()
-                if sid not in keep:
-                    continue
-                t = (c.get("Contact_Type") or "").strip()
-                if t == "B":
-                    buyers[sid] = (c.get("Name") or "").strip()
-                elif t == "P":
-                    titles[sid] = (c.get("Company") or "").strip()
-    return buyers, titles
-
-
-def _sale_ids(zips):
-    """(parcel, date) -> SDF_ID, כדי לקשר בין רשומת מכירה לשם הקונה."""
-    out = {}
-    for year, path in sdf.files():
-        with zipfile.ZipFile(path) as zf:
-            names = {n.upper(): n for n in zf.namelist()}
-            parcels = {}
-            for p in sdf._rows(zf, names["SALEPARCEL.TXT"]):
-                if (p.get("A5_ZipCode") or "").strip()[:5] in zips:
-                    parcels[(p.get("SDF_ID") or "").strip()] = \
-                        (p.get("A1_Parcel_Number") or "").strip()
-            for s in sdf._rows(zf, names["SALEDISC.TXT"]):
-                sid = (s.get("SDF_ID") or "").strip()
-                if sid in parcels and (s.get("County_ID") or "").strip() == "49":
-                    out[(parcels[sid], (s.get("C7_Conveyance_Date") or "").strip()[:10])] = sid
-    return out
-
-
 def rivals_analysis(sales, flips):
-    zips = set(sdf.BUY_BOX)
-    print("  קורא שמות קונים וחברות טייטל...", file=sys.stderr)
-    buyers, titles = _buyer_index(zips)
-    ids = _sale_ids(zips)
-
-    # לכל רכישה: מי קנה, איך קנה, ומה קרה אחר כך
+    # לכל רכישה: מי קנה, איך קנה, ומה קרה אחר כך. שמות הקונים כבר על הרשומות (sdf.load)
     by_rival = defaultdict(lambda: {"buys": [], "flips": []})
     for s in sales:
-        sid = ids.get((s["parcel"], s["date"]))
-        name = (buyers.get(sid) or "").upper()
         for r in RIVALS:
-            if r in name:
-                by_rival[r]["buys"].append((s, sid))
+            if r in s["buyer"]:
+                by_rival[r]["buys"].append((s, s["sid"]))
     for f in flips:
-        sid = ids.get((f["parcel"], f["buy_date"]))
-        name = (buyers.get(sid) or "").upper()
         for r in RIVALS:
-            if r in name:
-                by_rival[r]["flips"].append((f, sid))
+            if r in f["flipper"]:
+                by_rival[r]["flips"].append((f, f["sid"]))
+    titles = {s["sid"]: s["title"] for s in sales}
 
-    print(f"\n{'='*74}\nהמודל העסקי של המתחרים — מתוך רישומי המכר\n{'='*74}")
+    top_flippers(flips)
+    print(f"\n{'='*74}\nרשימת הייחוס — סיטונאים, משכיר ו-HomeGo, מתוך רישומי המכר\n{'='*74}")
     for r in RIVALS:
         d = by_rival.get(r)
         if not d or not d["buys"]:
             continue
         buys, fl = d["buys"], d["flips"]
-        off = sum(1 for s, _ in buys if s["dom"] == 0)
         dist = sum(1 for s, _ in buys if s["distress"])
         tc = Counter(titles.get(sid, "—") for _, sid in buys if titles.get(sid))
         print(f"\n▌ {r}")
         print(f"  רכישות {len(buys)}  ·  מהן נמכרו תוך 18 ח': {len(fl)}"
               f"  ({len(fl)/len(buys)*100:.0f}%)")
         print(f"  מחיר רכישה חציוני   ${st.median([s['price'] for s, _ in buys]):>9,.0f}")
-        print(f"  🔑 נרכש מחוץ לשוק   {off:>3}/{len(buys)} = {off/len(buys)*100:.0f}%"
-              f"   (0 ימי שיווק ברישום)")
-        print(f"     נרכש בעסקת מצוקה {dist:>3}/{len(buys)} = {dist/len(buys)*100:.0f}%")
+        print(f"     נרכש בעסקת מצוקה {dist:>3}/{len(buys)} = {dist/len(buys)*100:.0f}%"
+              f"   (ערוץ הרכישה של השאר אינו מדיד — C8_Market_Days לא דווח ב-91%)")
         if tc:
             top = " · ".join(f"{n[:30]} ({c})" for n, c in tc.most_common(2))
             print(f"     חברת טייטל       {top}")
@@ -195,6 +151,32 @@ def rivals_analysis(sales, flips):
     print(f"\n{'-'*74}")
     print("קריאה: החזקה קצרה + קונה קצה שהוא משקיע = wholesale (אין שיפוץ).")
     print("       החזקה 4-8 ח' + קונה תופס = פליפ שיפוץ אמיתי.")
+
+
+def top_flippers(flips, n=15, reno=52_416):
+    """
+    מי באמת עושה את העסק שלך: הקונים הגדולים של פליפים אמיתיים שעוברים את הכלל,
+    24 החודשים האחרונים. מהנתונים, לא מרשימה קשיחה. RIVALS למעלה הם רשימת ייחוס
+    (סיטונאים/משכיר) — לא המתחרים על אותה עסקה.
+    """
+    end = max(f["date"] for f in flips)
+    since = f"{int(end[:4]) - 2}{end[4:]}"
+    pas = [f for f in flips if f["date"] >= since and sdf.RULE * f["sell"] - f["buy"] >= reno]
+    by = defaultdict(list)
+    for f in pas:
+        by[f["flipper"] or "?"].append(f)
+    top = sorted(by.items(), key=lambda kv: -len(kv[1]))[:n]
+    print(f"\n{'='*74}\nמי עושה את העסק שלך — קוני הפליפים שעוברים את כלל ה-{sdf.RULE:.0%}"
+          f" (${reno:,}), {since[:7]}–{end[:7]}\n{'='*74}")
+    print(f"{len(pas)} עסקאות · {len(by)} קונים שונים · {n} הגדולים = "
+          f"{sum(len(v) for _, v in top)/max(1, len(pas)):.0%}  ← שוק מפוצל, אין שחקן דומיננטי")
+    print(f"\n{'קונה':<28}{'עסקאות':>7}{'מרווח':>10}{'החזקה':>7}{'תופס':>6}  זיפים")
+    for name, fl in top:
+        zc = Counter(f["zip"] for f in fl)
+        print(f"{name[:27]:<28}{len(fl):>7}{st.median([f['sell'] - f['buy'] for f in fl]):>10,.0f}"
+              f"{st.median([f['months'] for f in fl]):>6.1f}ח{sum(f['owner_occ'] for f in fl)/len(fl):>6.0%}  "
+              + " ".join(f"{z}({c})" for z, c in zc.most_common(3)))
+    return top
 
 
 # ─────────────────── ניתוח 3: המלאי החי של המתחרים ───────────────────
@@ -361,7 +343,7 @@ def _i(v):
 
 
 def selftest():
-    # האלגברה של כלל ה-70%: מרווח נדרש = (1-rule)·S + R
+    # האלגברה של כלל ההצעה: מרווח נדרש = (1-rule)·S + R
     S, R, rule = 250_000, 52_416, 0.70
     need = (1 - rule) * S + R
     assert abs(need - 127_416) < 1
