@@ -51,6 +51,62 @@ ANCHORS = [
     ("land", "Geist Reservoir", 39.9200, -85.9700, "פרמיית חזית אגם ב-46236"),
 ]
 
+# ── סניפי Momentum Title (לשעבר Hocker Title, נרכשה 22.4.2025) ──────────
+# Hocker היא חברת הטייטל של גם Brooks (המשפץ) וגם Simple Quarters (הסיטונאי)
+# ברישומי המכר — ולכן זו נקודת הכניסה. כתובות מ-momentumclosings.com, 6.9.2026.
+BRANCHES = [
+    ("Indianapolis Main", "6626 E 75th St, Floor 4, Indianapolis, IN 46250", 39.89075, -86.05247),
+    ("Indianapolis East", "6767 E Washington St, Indianapolis, IN 46219", 39.77178, -86.05049),
+    ("Indianapolis West", "2629 Waterfront Pkwy E Dr #110, Indianapolis, IN 46214", 39.80352, -86.27918),
+    ("Indianapolis South", "3209 W Smith Valley Rd, Greenwood, IN 46142", 39.60575, -86.16356),
+    ("Indianapolis Downtown", "516 Lincoln St, Indianapolis, IN 46203", 39.74565, -86.14921),
+    ("Carmel", "10333 N Meridian St Ste 101, Carmel, IN 46290", 39.9155, -86.1568),  # ⚠️ מקורב — הגיאוקודר לא מצא
+]
+
+# ── מחוזות: מריון מול "הדונאט" ──────────────────────────────────────────
+# מ-CLAUDE.md § 5: כל מחוז מס במריון חורג מ-2% ⇒ ניכוי SEA 1 שווה שם $0.
+# בדונאט 1.40%-1.99% ⇒ פער החזקה של $285-$515 לעסקה, ומתרחב.
+COUNTY_URL = ("https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/"
+              "State_County/MapServer/13/query")
+COUNTY_CACHE = os.path.join(sdf.DATA, "in_counties.json")
+COUNTIES = {
+    "Marion":  ("🎯 שוק היעד", ">2.00%", "כל מחוז מס חורג מ-2% ⇒ ניכוי SEA 1 = $0"),
+    "Hamilton": ("דונאט", "1.40-1.99%", "חוצה את 46236 Geist מצפון ל-96th · HSE schools"),
+    "Hancock":  ("דונאט", "1.40-1.99%", "חוצה את 46229 Cumberland · Mt. Vernon schools"),
+    "Johnson":  ("דונאט", "1.40-1.99%", "Greenwood · דרומית ל-46217/46237"),
+    "Hendricks": ("דונאט", "1.40-1.99%", "Plainfield/Avon · לוגיסטיקה"),
+    "Boone":    ("דונאט", "1.40-1.99%", "LEAP/Lilly $18B · הצומח ביותר"),
+    "Morgan":   ("דונאט", "1.40-1.99%", "כפרי-פרברי דרום"),
+    "Shelby":   ("דונאט", "1.40-1.99%", "דרום-מזרח"),
+    "Madison":  ("דונאט", "1.40-1.99%", "Anderson · צפון-מזרח"),
+}
+
+
+def county_polygons():
+    """גבולות המחוזות במטרו. TIGERweb של לשכת המפקד — חינם, בלי מפתח."""
+    if os.path.exists(COUNTY_CACHE):
+        with open(COUNTY_CACHE, encoding="utf-8") as f:
+            raw = json.load(f)
+    else:
+        q = ("?where=STATE%3D%2718%27&outFields=NAME&returnGeometry=true"
+             "&outSR=4326&f=geojson")
+        req = Request(COUNTY_URL + q, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=180) as r:
+            raw = json.loads(r.read().decode("utf-8", "replace"))
+        os.makedirs(sdf.DATA, exist_ok=True)
+        with open(COUNTY_CACHE, "w", encoding="utf-8") as f:
+            json.dump(raw, f)
+    out = []
+    for feat in raw.get("features", []):
+        name = (feat.get("properties", {}).get("NAME") or "").replace(" County", "")
+        if name not in COUNTIES:
+            continue
+        tier, tax, note = COUNTIES[name]
+        out.append({"name": name, "tier": tier, "tax": tax, "note": note,
+                    "geometry": _thin(feat["geometry"], 4)})
+    return out
+
+
 # מסדרון ה-Blue Line על Washington St — שיבוש בנייה עד 2028
 BLUE_LINE = [[39.7690, -86.2600], [39.7685, -86.2000], [39.7680, -86.1580],
              [39.7700, -86.1000], [39.7720, -86.0500], [39.7740, -86.0100]]
@@ -204,6 +260,8 @@ def build():
             bg.append([round(ll[0], 5), round(ll[1], 5), round(s["price"] / 1000),
                        int(s["date"][:4]), 1 if s["distress"] else 0])
 
+    print("  גבולות מחוזות...", file=sys.stderr)
+    counties = county_polygons()
     print("  חברות טייטל...", file=sys.stderr)
     titles = title_companies()
     print("  קונים חוזרים...", file=sys.stderr)
@@ -212,6 +270,7 @@ def build():
     payload = {
         "pts": pts, "bg": bg, "stats": stats, "polys": polys,
         "anchors": ANCHORS, "blueline": BLUE_LINE, "titles": titles,
+        "counties": counties, "branches": BRANCHES,
         "buyers": buyers, "buybox": sdf.BUY_BOX,
         "built": date.today().isoformat(),
         "years": [sdf.YEARS[0], sdf.YEARS[-1]],
@@ -223,7 +282,8 @@ def build():
     mb = os.path.getsize(OUT) / 1e6
     print(f"\n✅ {OUT}  ({mb:.1f}MB)")
     print(f"   {len(pts):,} פליפים ממופים מתוך {len(flips):,} ({payload['geo_rate']}% גיאוקוד)")
-    print(f"   {len(bg):,} מכירות רקע · {len(polys)} גבולות זיפים")
+    print(f"   {len(bg):,} מכירות רקע · {len(polys)} גבולות זיפים "
+          f"· {len(counties)} מחוזות · {len(BRANCHES)} סניפי טייטל")
     print(f"\n   פתיחה:  open {OUT}")
 
 
@@ -271,6 +331,17 @@ tr:hover{background:#1e242c;cursor:pointer}
 .leaflet-popup-tip{background:#11151a}
 .leaflet-popup-content{margin:11px 13px;direction:rtl;font-size:12px}
 .pk{color:var(--dim)} .pv{font-weight:600;font-variant-numeric:tabular-nums}
+/* תוויות מחוזות — קבועות על המפה, לא בריחוף */
+.colbl{background:none!important;border:none!important;box-shadow:none!important;
+  padding:0!important;white-space:nowrap;font-weight:800;letter-spacing:.5px;
+  text-transform:uppercase;pointer-events:none}
+.colbl::before{display:none!important}
+.colbl .n{font-size:15px;text-shadow:0 0 4px #000,0 0 9px #000,0 2px 3px #000}
+.colbl .t{font-size:10.5px;font-weight:700;letter-spacing:0;opacity:.95;
+  text-transform:none;text-shadow:0 0 4px #000,0 0 8px #000}
+.colbl.marion .n{font-size:19px;color:#fbbf24}
+.colbl.marion .t{color:#fbbf24}
+.colbl.donut .n{color:#cbd5e1} .colbl.donut .t{color:#94a3b8}
 .pop-row{display:flex;justify-content:space-between;gap:14px;padding:1px 0}
 .legend{position:absolute;bottom:14px;right:394px;background:rgba(15,18,22,.93);
   border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:11px;z-index:600}
@@ -307,6 +378,8 @@ tr:hover{background:#1e242c;cursor:pointer}
   <div class="chk"><input type="checkbox" id="foo"><label for="foo" style="margin:0">רק יציאה לקונה תופס</label></div>
   <div class="chk"><input type="checkbox" id="fbg"><label for="fbg" style="margin:0">הצג את כל המכירות ברקע</label></div>
   <div class="chk"><input type="checkbox" id="fan" checked><label for="fan" style="margin:0">עוגני תעסוקה ומסחר</label></div>
+  <div class="chk"><input type="checkbox" id="fco"><label for="fco" style="margin:0">גבולות מחוזות (מס רכוש)</label></div>
+  <div class="chk"><input type="checkbox" id="fbr" checked><label for="fbr" style="margin:0">סניפי Momentum Title</label></div>
   <button onclick="reset()" style="margin-top:9px">אפס סינון</button>
 
   <h2>מה מוצג</h2>
@@ -369,6 +442,36 @@ const zLayer = L.geoJSON(
        <br>תופס ${s.owner??'—'}% · ${s.flips||0} פליפים`,{sticky:true});
      l.on('click',()=>{$('fz').value=z; draw();});}
   }).addTo(map);
+
+/* --- מחוזות: מריון מול הדונאט --- */
+const coLayer = L.geoJSON(
+  {type:'FeatureCollection', features:D.counties.map(c=>({type:'Feature',
+     properties:c, geometry:c.geometry}))},
+  {style:f=>{const m = f.properties.name==='Marion';
+     return {color:m?'#f59e0b':'#94a3b8', weight:m?5:2.5, opacity:m?1:.75,
+             fill:true, fillColor:m?'#f59e0b':'#64748b', fillOpacity:m?.05:.02,
+             dashArray:m?null:'10,7'};},
+   onEachFeature:(f,l)=>{const p=f.properties, m=p.name==='Marion';
+     l.bindTooltip(
+       `<div class="colbl ${m?'marion':'donut'}">
+          <div class="n">${m?'◆ ':''}${p.name}</div>
+          <div class="t">מס רכוש ${p.tax}</div>
+        </div>`,
+       {permanent:true, direction:'center', className:'colbl', opacity:1});
+     l.bindPopup(`<b>${p.name} County</b> · ${p.tier}
+       <br>תקרת מס רכוש <b>${p.tax}</b><br><span class="pk">${p.note}</span>`);}
+  });
+
+/* --- סניפי Momentum Title (לשעבר Hocker) --- */
+const brLayer = L.layerGroup(D.branches.map(([name,addr,lat,lon])=>
+  L.marker([lat,lon],{icon:L.divIcon({className:'',iconSize:[22,22],
+    html:`<div style="background:#22c55e;color:#0b0e12;border-radius:4px;width:22px;
+      height:22px;display:flex;align-items:center;justify-content:center;
+      font-size:12px;font-weight:700;box-shadow:0 0 0 2px rgba(0,0,0,.6)">T</div>`})})
+   .bindPopup(`<b>${name}</b><br><span class="pk">${addr}</span>
+     <br><span class="pk" style="font-size:10px">Momentum Title — לשעבר Hocker Title,
+     חברת הטייטל של Brooks ו-Simple Quarters</span>`)
+)).addTo(map);
 
 /* --- עוגנים --- */
 const ICO = {job:['#38bdf8','🏭'], retail:['#a78bfa','🛍'], dead:['#ef4444','✖'], land:['#94a3b8','◆']};
@@ -443,16 +546,20 @@ function draw(){
       map.addLayer(bgLayer);
     }
   } else map.removeLayer(bgLayer);
-  map.hasLayer(anchors)===$('fan').checked || ($('fan').checked?map.addLayer(anchors):map.removeLayer(anchors));
+  [[anchors,'fan'],[coLayer,'fco'],[brLayer,'fbr']].forEach(([L_,id])=>{
+    const on = $(id).checked;
+    if (on !== map.hasLayer(L_)) on ? map.addLayer(L_) : map.removeLayer(L_);
+  });
 }
 
 function reset(){
   $('fz').value=''; $('fmax').value=600; $('fspr').value=0; $('froom').value=-50;
   $('fmon').value=18; $('fyr').value=2023;
-  ['fds','foo','fbg'].forEach(i=>$(i).checked=false); $('fan').checked=true;
+  ['fds','foo','fbg','fco'].forEach(i=>$(i).checked=false);
+  ['fan','fbr'].forEach(i=>$(i).checked=true);
   map.setView([39.79,-86.15],11); draw();
 }
-['fz','fmax','fspr','froom','fmon','fyr','fds','foo','fbg','fan']
+['fz','fmax','fspr','froom','fmon','fyr','fds','foo','fbg','fan','fco','fbr']
   .forEach(i=>$(i).addEventListener('input',draw));
 
 /* --- טבלאות --- */
