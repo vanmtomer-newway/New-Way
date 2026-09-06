@@ -14,6 +14,7 @@ from datetime import date
 from urllib.request import urlopen, Request
 
 import sdf
+import analyze
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deals_map.html")
 ZIP_GEO_URL = ("https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON"
@@ -223,6 +224,48 @@ def active_buyers(sales, flips):
     return [(n, c, flip_counts.get(n, 0)) for n, c in counts.most_common(40) if c >= 4][:20]
 
 
+# צבע לכל מפעיל בשכבת המלאי החי
+RIVAL_COLOR = {
+    "SIMPLE QUARTERS": "#f472b6", "BROOKS HOLDINGS": "#facc15",
+    "GRISE HOME": "#fb923c", "POWER HOUSE HOLDINGS": "#22d3ee",
+    "AMERICAN INTERNATIONAL HOME": "#a3a3a3", "OWNEZ HOLDINGS": "#c084fc",
+}
+
+
+def rival_inventory(sales):
+    """
+    מה שכל מתחרה מחזיק *עכשיו* לפי רשומות השומה — הצינור הפעיל שלו.
+    זו הטיית שורדים הפוכה: מה שנמכר מהר איננו כאן; מה שנשאר הוא מה שנתקע.
+    """
+    inv = analyze.live_inventory()
+    last = {}
+    for s in sales:
+        k = s["parcel"]
+        if k and (k not in last or s["date"] > last[k][0]):
+            last[k] = (s["date"], s["price"])
+    today = max((s["date"] for s in sales), default=date.today().isoformat())
+
+    out = []
+    for rival, feats in inv.items():
+        for f in feats:
+            ll = analyze._centroid(f.get("geometry"))
+            if not ll:
+                continue
+            p = f.get("properties", {})
+            pc = analyze._parcel(p.get("STATEPARCELNUMBER"))
+            d, price = last.get(pc, (None, 0))
+            out.append({
+                "r": rival, "lat": ll[0], "lon": ll[1],
+                "z": (p.get("ZIPCODE") or "")[:5],
+                "a": f"{p.get('STNUMBER') or ''} {p.get('FULL_STNAME') or ''}".strip()[:40],
+                "av": analyze._i(p.get("ASSESSORYEAR_TOTALAV")),
+                "d": (d or "")[:7], "p": round(price),
+                "mo": round(sdf._months(d, today), 1) if d else None,
+                "land": 1 if "VACANT" in (p.get("PROPERTY_SUB_CLASS_DESCRIPTION") or "").upper() else 0,
+            })
+    return out
+
+
 def build():
     print("טוען נתונים...", file=sys.stderr)
     # כל 33 הזיפים מטבלת המחקר — לסטטיסטיקה ולגבולות, כדי שיהיה מול מה להשוות
@@ -262,6 +305,8 @@ def build():
 
     print("  גבולות מחוזות...", file=sys.stderr)
     counties = county_polygons()
+    print("  מלאי חי של המתחרים...", file=sys.stderr)
+    inventory = rival_inventory(every)
     print("  חברות טייטל...", file=sys.stderr)
     titles = title_companies()
     print("  קונים חוזרים...", file=sys.stderr)
@@ -270,7 +315,7 @@ def build():
     payload = {
         "pts": pts, "bg": bg, "stats": stats, "polys": polys,
         "anchors": ANCHORS, "blueline": BLUE_LINE, "titles": titles,
-        "counties": counties, "branches": BRANCHES,
+        "counties": counties, "branches": BRANCHES, "inv": inventory,
         "buyers": buyers, "buybox": sdf.BUY_BOX,
         "built": date.today().isoformat(),
         "years": [sdf.YEARS[0], sdf.YEARS[-1]],
@@ -283,7 +328,8 @@ def build():
     print(f"\n✅ {OUT}  ({mb:.1f}MB)")
     print(f"   {len(pts):,} פליפים ממופים מתוך {len(flips):,} ({payload['geo_rate']}% גיאוקוד)")
     print(f"   {len(bg):,} מכירות רקע · {len(polys)} גבולות זיפים "
-          f"· {len(counties)} מחוזות · {len(BRANCHES)} סניפי טייטל")
+          f"· {len(counties)} מחוזות · {len(BRANCHES)} סניפי טייטל "
+          f"· {len(inventory)} חלקות במלאי המתחרים")
     print(f"\n   פתיחה:  open {OUT}")
 
 
@@ -380,6 +426,7 @@ tr:hover{background:#1e242c;cursor:pointer}
   <div class="chk"><input type="checkbox" id="fan" checked><label for="fan" style="margin:0">עוגני תעסוקה ומסחר</label></div>
   <div class="chk"><input type="checkbox" id="fco"><label for="fco" style="margin:0">גבולות מחוזות (מס רכוש)</label></div>
   <div class="chk"><input type="checkbox" id="fbr" checked><label for="fbr" style="margin:0">סניפי Momentum Title</label></div>
+  <div class="chk"><input type="checkbox" id="finv"><label for="finv" style="margin:0">🔑 המלאי החי של המתחרים</label></div>
   <button onclick="reset()" style="margin-top:9px">אפס סינון</button>
 
   <h2>מה מוצג</h2>
@@ -473,6 +520,25 @@ const brLayer = L.layerGroup(D.branches.map(([name,addr,lat,lon])=>
      חברת הטייטל של Brooks ו-Simple Quarters</span>`)
 )).addTo(map);
 
+/* --- המלאי החי של המתחרים — מה שהם מחזיקים עכשיו --- */
+const RC = {"SIMPLE QUARTERS":"#f472b6","BROOKS HOLDINGS":"#facc15",
+  "GRISE HOME":"#fb923c","POWER HOUSE HOLDINGS":"#22d3ee",
+  "AMERICAN INTERNATIONAL HOME":"#a3a3a3","OWNEZ HOLDINGS":"#c084fc"};
+const BB = new Set(D.buybox);
+const invLayer = L.layerGroup(D.inv.map(p=>{
+  const inBox = BB.has(p.z), stuck = p.mo && p.mo>12 && p.r!=='AMERICAN INTERNATIONAL HOME';
+  return L.circleMarker([p.lat,p.lon],{
+    radius: inBox?6:3.5, weight: stuck?2.5:1,
+    color: stuck?'#ef4444':'#0b0e12', fillColor: RC[p.r]||'#94a3b8',
+    fillOpacity: inBox?.92:.4})
+   .bindPopup(`<b>${p.a||'—'}</b> · ${p.z}
+     <br><span class="pk">${p.r}${p.land?' · ⬜ קרקע ריקה':''}</span>
+     <br>שווי שומה <span class="pv">${usd(p.av)}</span>
+     ${p.d?`<br>נקנה ${p.d}${p.p?` ב-${usd(p.p)}`:''} · <b>מוחזק ${p.mo} ח'</b>`
+          :'<br><span class="pk">נקנה לפני 2023 — מחוץ למדגם</span>'}
+     ${stuck?'<br><b style="color:#ef4444">🔴 מוחזק מעל שנה</b>':''}`);
+})); 
+
 /* --- עוגנים --- */
 const ICO = {job:['#38bdf8','🏭'], retail:['#a78bfa','🛍'], dead:['#ef4444','✖'], land:['#94a3b8','◆']};
 const anchors = L.layerGroup(D.anchors.map(([k,name,lat,lon,note])=>{
@@ -546,7 +612,7 @@ function draw(){
       map.addLayer(bgLayer);
     }
   } else map.removeLayer(bgLayer);
-  [[anchors,'fan'],[coLayer,'fco'],[brLayer,'fbr']].forEach(([L_,id])=>{
+  [[anchors,'fan'],[coLayer,'fco'],[brLayer,'fbr'],[invLayer,'finv']].forEach(([L_,id])=>{
     const on = $(id).checked;
     if (on !== map.hasLayer(L_)) on ? map.addLayer(L_) : map.removeLayer(L_);
   });
@@ -555,11 +621,11 @@ function draw(){
 function reset(){
   $('fz').value=''; $('fmax').value=600; $('fspr').value=0; $('froom').value=-50;
   $('fmon').value=18; $('fyr').value=2023;
-  ['fds','foo','fbg','fco'].forEach(i=>$(i).checked=false);
+  ['fds','foo','fbg','fco','finv'].forEach(i=>$(i).checked=false);
   ['fan','fbr'].forEach(i=>$(i).checked=true);
   map.setView([39.79,-86.15],11); draw();
 }
-['fz','fmax','fspr','froom','fmon','fyr','fds','foo','fbg','fan','fco','fbr']
+['fz','fmax','fspr','froom','fmon','fyr','fds','foo','fbg','fan','fco','fbr','finv']
   .forEach(i=>$(i).addEventListener('input',draw));
 
 /* --- טבלאות --- */

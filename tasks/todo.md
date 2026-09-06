@@ -129,3 +129,51 @@ $67,085 מעל.
   ומהם **4** שנסגרו תוך 6 חודשים. זו זרימת העסקאות האמיתית בזיפ הזה, ל-4 שנים.
 - שני מפעילים כמעט-טהורים: **Simple Quarters LLC** (57 רכישות, 54 פליפים)
   ו-**Brooks Holdings LLC** (28/27). הם התחרות הישירה — וגם מקור עסקאות אפשרי.
+
+## פאזה 1.8 — המלאי החי של המתחרים ✅
+
+`python3 analyze.py inventory` — **עובד. 412 חלקות, 123 מהן בזיפי ה-BUY BOX.**
+השכבה נוספה גם למפה (צ'קבוקס "🔑 המלאי החי של המתחרים").
+
+### ✅ מה שכן אומת — הנתונים קיימים וזמינים
+שאילתת `FULLOWNERNAME` בשכבת החלקות עובדת. ספירות חיות, 6.9.2026:
+
+| מפעיל | חלקות בבעלות **עכשיו** |
+|---|---|
+| GRISE HOME | **170** |
+| SIMPLE QUARTERS | **111** |
+| OWNEZ HOLDINGS | 60 |
+| AMERICAN INTERNATIONAL HOME | 51 |
+| BROOKS HOLDINGS | 18 |
+| **POWER HOUSE HOLDINGS (HomeGo)** | **2** ← עסק של מהירות, לא של מלאי |
+| "HOMEGO" כשם בעלים | 0 — הבעלות רשומה על השם המשפטי בלבד |
+
+הרשומה מחזירה: `STATEPARCELNUMBER` · `ZIPCODE` · `PROPERTY_SUB_CLASS` (510/511)
+· `ASSESSORYEAR_TOTALAV` · `ASSESSORYEAR_IMPTOTAL` · `OWNERADDRESS` · `ACREAGE`.
+
+### ✅ הבאג תוקן — האבחון נשמר כדי שלא יחזור
+`_fetch_owner()` שולח `resultOffset` + `f=geojson` + `returnGeometry=true`.
+נבדקו ארבע קומבינציות מול השרת:
+
+| שאילתה | תוצאה |
+|---|---|
+| `f=geojson` + `returnGeometry=true` | ❌ `Failed to execute query` |
+| `f=geojson` + `returnGeometry=false` | ✅ 18 רשומות |
+| כל שאילתה עם **`resultOffset`** | ❌ נכשלת |
+| **`f=json` + `returnGeometry=true` + `outSR=4326`, בלי offset** | ✅ **18 רשומות** |
+
+👉 **השרת הזה (MapServer ישן) לא תומך ב-`resultOffset`, ולא ב-geojson יחד
+עם גאומטריה.** התיקון: להוריד את לולאת ה-pagination ולעבור ל-`f=json` +
+`returnGeometry=true` + `outSR=4326`, ולקרוא `features[].attributes`
+במקום `features[].properties`.
+⚠️ בלי pagination יש תקרה של 1,000 רשומות לשאילתה. המקסימום כרגע 170,
+אבל **חובה לזהות חיתוך** (`exceededTransferLimit`) ולא לחתוך בשקט.
+
+### ✅ מה שנעשה
+- [x] `_fetch_owner()` תוקן: בלי pagination, `f=json`, `attributes`.
+      **כישלון שאילתה זורק חריגה** במקום להחזיר רשימה ריקה — זה היה הבאג
+- [x] נרמול מספר חלקה: `49-06-26-126-076.000-101` → `490626126076000101`.
+      בלי זה שום חלקה לא התחברה למכירה. יש בדיקה עצמית
+- [x] שכבה במפה, צבע לכל מפעיל, חלקות ה-BUY BOX גדולות יותר
+- [x] חציון החזקה **לפי מפעיל ולא מצרפי** — המצרף (32.4 ח') נשלט כולו
+      ע"י המשכיר ולכן היה חסר משמעות

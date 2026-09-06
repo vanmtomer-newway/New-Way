@@ -54,6 +54,7 @@ python3 sdf.py flips       # הפליפים שנמצאו, לפי גודל הרו
 
 python3 arv.py comps "6259 Chadworth Court"               # קומפס + טווח ARV
 python3 arv.py deal  "6259 Chadworth Court" --offer 241469 --reno 52416
+python3 analyze.py inventory  # המלאי החי של המתחרים — מה כל אחד מחזיק עכשיו
 python3 arv.py backtest                                   # מוכיח את הדיוק
 
 python3 sdf.py selftest    # בדיקה עצמית

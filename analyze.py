@@ -4,15 +4,22 @@
 
     python3 analyze.py filter     # למה כלל ה-70% תופס רק 19%, ואיך מרחיבים
     python3 analyze.py rivals     # המודל העסקי של המתחרים, מתוך רישומי המכר
+    python3 analyze.py inventory  # המלאי החי — מה כל אחד מחזיק *עכשיו*
 """
-import sys, zipfile, statistics as st
+import json, os, sys, zipfile, statistics as st
 from collections import defaultdict, Counter
+from urllib.parse import urlencode
+from urllib.request import urlopen, Request
 
 import sdf
 
 # מהמחקר: 4 המפעילים הגדולים בזיפי ה-BUY BOX
 RIVALS = ["SIMPLE QUARTERS", "BROOKS HOLDINGS", "GRISE HOME", "POWER HOUSE HOLDINGS",
           "AMERICAN INTERNATIONAL HOME", "OWNEZ HOLDINGS"]
+
+# קונה-ומחזיק: 0 מכירות חוזרות ב-4 שנות נתונים. החזקה ארוכה היא המודל
+# שלו, לא עסקה תקועה — ולכן הוא מוצא מסטטיסטיקת ה"תקוע" כדי לא להטות אותה.
+LANDLORDS = {"AMERICAN INTERNATIONAL HOME"}
 
 
 # ─────────────────────────── ניתוח 1: המסנן ───────────────────────────
@@ -187,6 +194,169 @@ def rivals_analysis(sales, flips):
     print("       החזקה 4-8 ח' + קונה תופס = פליפ שיפוץ אמיתי.")
 
 
+# ─────────────────── ניתוח 3: המלאי החי של המתחרים ───────────────────
+
+PARCEL_URL = ("https://xmaps.indy.gov/arcgis/rest/services/Common/"
+              "CommonlyUsedLayers/MapServer/0/query")
+INV_CACHE = os.path.join(sdf.DATA, "rival_inventory.json")
+# 🔴 השרת הזה הוא MapServer ישן. אומת 6.9.2026 בארבע קומבינציות:
+#   f=geojson + גאומטריה      -> "Failed to execute query"
+#   כל שאילתה עם resultOffset  -> נכשלת (אין תמיכה ב-pagination)
+#   f=json + גאומטריה + outSR  -> ✅ עובד
+# ולכן: בלי pagination, ו-`attributes` במקום `properties`.
+FIELDS = ("STATEPARCELNUMBER,FULLOWNERNAME,STNUMBER,FULL_STNAME,CITY,ZIPCODE,"
+          "TOWNSHIP,PROPERTY_CLASS,PROPERTY_SUB_CLASS,"
+          "PROPERTY_SUB_CLASS_DESCRIPTION,ASSESSORYEAR_IMPTOTAL,"
+          "ASSESSORYEAR_TOTALAV,OWNERADDRESS,OWNERCITY,ACREAGE")
+
+
+def _fetch_owner(name):
+    """
+    כל החלקות שהבעלים הנוכחי שלהן מכיל את `name`.
+
+    ⚠️ בלי pagination — השרת לא תומך. יש תקרה של ~1,000 רשומות לשאילתה,
+    ולכן חיתום נבדק במפורש ומדווח. **כישלון זורק, לא מחזיר רשימה ריקה** —
+    זה בדיוק הבאג שהחזיר 0 רשומות בשקט.
+    """
+    q = urlencode({
+        "where": f"UPPER(FULLOWNERNAME) LIKE '%{name}%'",
+        "outFields": FIELDS,
+        "returnGeometry": "true", "outSR": "4326", "f": "json",
+    })
+    req = Request(f"{PARCEL_URL}?{q}", headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(req, timeout=180) as r:
+        data = json.loads(r.read().decode("utf-8", "replace"))
+    if "error" in data:
+        raise RuntimeError(f"שאילתת החלקות נכשלה עבור {name!r}: "
+                           f"{data['error'].get('message')}")
+    if data.get("exceededTransferLimit"):
+        print(f"    ⚠️ {name}: התוצאה נחתכה בתקרת השרת — הספירה חלקית!",
+              file=sys.stderr)
+    # נרמול לצורה אחת: rings של ArcGIS -> coordinates, attributes -> properties
+    return [{"properties": f.get("attributes", {}),
+             "geometry": {"coordinates": (f.get("geometry") or {}).get("rings")}}
+            for f in data.get("features", [])]
+
+
+def live_inventory(refresh=False):
+    """
+    המלאי החי — מה שכל מפעיל מחזיק *עכשיו* לפי רשומות השומה.
+    זה לא היסטוריית מכר; זה הצינור הפעיל שלהם.
+    נשמר במטמון כדי לא להעמיס על שרת העירייה.
+    """
+    if os.path.exists(INV_CACHE) and not refresh:
+        with open(INV_CACHE, encoding="utf-8") as f:
+            return json.load(f)
+    out = {}
+    for r in RIVALS:
+        print(f"  שולף {r}...", file=sys.stderr)
+        out[r] = _fetch_owner(r)
+    os.makedirs(sdf.DATA, exist_ok=True)
+    with open(INV_CACHE, "w", encoding="utf-8") as f:
+        json.dump(out, f)
+    return out
+
+
+def _centroid(geom):
+    """מרכז מקורב של פוליגון חלקה — מספיק לסימון על מפה."""
+    if not geom:
+        return None
+    rings = geom.get("coordinates") or []
+    while rings and isinstance(rings[0][0], list):
+        rings = rings[0]
+    pts = [p for p in rings if isinstance(p, list) and len(p) >= 2]
+    if not pts:
+        return None
+    return (round(sum(p[1] for p in pts) / len(pts), 6),
+            round(sum(p[0] for p in pts) / len(pts), 6))
+
+
+def inventory_analysis(sales, flips):
+    inv = live_inventory()
+    # תאריך הרכישה האחרון הידוע לכל חלקה, מרישומי המכר
+    last_buy = {}
+    for s in sales:
+        k = s["parcel"]
+        if k and (k not in last_buy or s["date"] > last_buy[k][0]):
+            last_buy[k] = (s["date"], s["price"])
+    today = max((s["date"] for s in sales), default="2026-09-06")
+
+    print(f"\n{'='*78}\nהמלאי החי של המתחרים — מי מחזיק מה *עכשיו*\n{'='*78}")
+    print("מקור: רשומות השומה של מריון קאונטי (xmaps.indy.gov), בעלים נוכחי.")
+    print("זו לא היסטוריית מכר — זה הצינור הפעיל.\n")
+    print(f"{'מפעיל':<30}{'חלקות':>7}{'ב-BUY BOX':>11}{'מגורים':>9}"
+          f"{'קרקע ריקה':>11}{'שווי שומה':>13}")
+    print("-" * 78)
+
+    buybox_rows = []
+    for r in RIVALS:
+        feats = inv.get(r) or []
+        if not feats:
+            continue
+        props = [f.get("properties", {}) for f in feats]
+        bb = [p for p in props if (p.get("ZIPCODE") or "")[:5] in sdf.BUY_BOX]
+        res = sum(1 for p in props if (p.get("PROPERTY_CLASS") or "") == "RESIDENTIAL")
+        vac = sum(1 for p in props
+                  if "VACANT" in (p.get("PROPERTY_SUB_CLASS_DESCRIPTION") or "").upper())
+        av = sum(_i(p.get("ASSESSORYEAR_TOTALAV")) for p in props)
+        print(f"{r:<30}{len(props):>7}{len(bb):>11}{res:>9}{vac:>11}{av:>13,.0f}")
+        for f in feats:
+            p = f.get("properties", {})
+            if (p.get("ZIPCODE") or "")[:5] not in sdf.BUY_BOX:
+                continue
+            pc = _parcel(p.get("STATEPARCELNUMBER"))
+            d, pr = last_buy.get(pc, (None, 0))
+            buybox_rows.append((r, p, d, pr, sdf._months(d, today) if d else None))
+
+    print("-" * 78)
+    print(f"\n🎯 החלקות בזיפי ה-BUY BOX — התחרות הישירה ({len(buybox_rows)})\n")
+    print(f"{'מפעיל':<22}{'ZIP':<7}{'שומה':>9}{'נקנה':>9}{'מוחזק':>8}  כתובת")
+    for r, p, d, pr, mo in sorted(buybox_rows, key=lambda x: -(x[4] or 0)):
+        addr = f"{p.get('STNUMBER') or ''} {p.get('FULL_STNAME') or ''}".strip()
+        flag = ("  🔴 תקוע?" if mo and mo > 9 and r not in LANDLORDS else
+                "  🏠 משכיר" if r in LANDLORDS else "")
+        print(f"{r[:20]:<22}{(p.get('ZIPCODE') or '')[:5]:<7}"
+              f"{_i(p.get('ASSESSORYEAR_TOTALAV')):>9,}"
+              f"{(d or '—')[:7]:>9}{(f'{mo:.1f} ח' if mo else '—'):>8}  {addr[:30]}{flag}")
+
+    # 🔴 מצרף את כולם יחד היה נותן 32.4 ח' — מספר שנשלט כולו ע"י המשכיר.
+    # לכל מפעיל מודל אחר, ולכן החציון מדווח לחוד.
+    print(f"\n{'-'*78}\nכמה זמן כל אחד מחזיק בפועל (כל המחוז, לא רק BUY BOX)\n{'-'*78}")
+    print(f"{'מפעיל':<30}{'n':>5}{'חציון':>9}{'מעל 12 ח\'':>12}  קריאה")
+    for r in RIVALS:
+        mo = [sdf._months(last_buy[pc][0], today)
+              for f in (inv.get(r) or [])
+              for pc in [_parcel(f.get("properties", {}).get("STATEPARCELNUMBER"))]
+              if pc in last_buy]
+        if not mo:
+            continue
+        over = sum(1 for m in mo if m > 12)
+        read = ("🏠 קונה-ומחזיק — זה המודל" if r in LANDLORDS else
+                "✅ מחזור מהיר, בלי מלאי תקוע" if st.median(mo) <= 4 else
+                "🔴 יושב על מלאי ישן" if st.median(mo) > 12 else
+                "🟡 איטי מהחתימה המוצהרת שלו")
+        print(f"{r:<30}{len(mo):>5}{st.median(mo):>8.1f}ח{over:>7}/{len(mo):<4}  {read}")
+
+    print("\n🔑 הקריאה: המלאי החי הוא **הטיית שורדים הפוכה**. המכירות המהירות")
+    print("   הן מה שהם הצליחו למכור; מה שנשאר בבעלות הוא מה שלא נמכר.")
+    print("\n⚠️ חלקה בלי תאריך רכישה = נקנתה לפני 2023 או מחוץ למדגם המכר שלנו.")
+
+
+def _parcel(v):
+    """
+    xmaps מחזיק `49-06-26-126-076.000-101`; ה-SDF מחזיק `490626126076000101`.
+    אותה חלקה, שני פורמטים. בלי הנרמול הזה שום חלקה לא מתחברת למכירה.
+    """
+    return (v or "").replace("-", "").replace(".", "").strip()
+
+
+def _i(v):
+    try:
+        return int(float(v or 0))
+    except (ValueError, TypeError):
+        return 0
+
+
 def selftest():
     # האלגברה של כלל ה-70%: מרווח נדרש = (1-rule)·S + R
     S, R, rule = 250_000, 52_416, 0.70
@@ -197,6 +367,16 @@ def selftest():
     assert rule * f["sell"] - f["buy"] >= R
     f2 = {"sell": S, "buy": S - need + 1}
     assert not (rule * f2["sell"] - f2["buy"] >= R)
+    # צנטרואיד: ריבוע היחידה -> (0.5, 0.5), וטבעת מקוננת נפרשת נכון
+    sq = [[0, 0], [1, 0], [1, 1], [0, 1]]
+    assert _centroid({"coordinates": [sq]}) == (0.5, 0.5)
+    assert _centroid({"coordinates": [[sq]]}) == (0.5, 0.5)
+    assert _centroid(None) is None and _centroid({"coordinates": []}) is None
+    assert _i("70600") == 70600 and _i(None) == 0 and _i("") == 0
+    # נרמול מספר חלקה — xmaps מול SDF
+    assert _parcel("49-06-26-126-076.000-101") == "490626126076000101"
+    assert len(_parcel("49-06-26-126-076.000-101")) == 18
+    assert _parcel(None) == "" and _parcel(" 49-01 ") == "4901"
     print("selftest: ok")
 
 
@@ -207,4 +387,5 @@ if __name__ == "__main__":
     else:
         sales = sdf.load()
         flips = sdf.find_flips(sales)
-        {"filter": filter_analysis, "rivals": rivals_analysis}[cmd](sales, flips)
+        {"filter": filter_analysis, "rivals": rivals_analysis,
+         "inventory": inventory_analysis}[cmd](sales, flips)
