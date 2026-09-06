@@ -1,0 +1,17 @@
+# נתונים שיורדים מחדש — ~140MB, לא שייך ל-git
+data/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+
+# סודות — אין כאלה בפרויקט כרגע, אבל מוגדר מראש
+.env
+*.key
+credentials*.json
+
+# קבצי נעילה של Excel
+~$*
