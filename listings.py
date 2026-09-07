@@ -10,17 +10,22 @@
     עד 350 מודעות לחיפוש, מינימום 20 תוצאות, דורש התחברות (חשבון חינמי).
     זו פונקציה שהאתר מציע למשתמש — לא גרידה. הקובץ כולל sqft, שנת בנייה,
     DOM וקואורדינטות — כל מה שהחיתום צריך.
-מקור ב' — RentCast, אוטומטי, רישוי נקי, 50 בקשות בחודש חינם. 12 זיפים = 12 בקשות,
-    ריצה שבועית = 48 ⇒ בלי מקום לריצה חוזרת — לכן snapshot יומי ב-data/rentcast/.
-    מפתח ב-RENTCAST_API_KEY (.env). אומת 6.9.2026: 913 מודעות פעילות ב-12 זיפים
-    (מול 350 בייצוא של Redfin). היסטוריית המחירים (↓N) עוד לא נבדקה על נתונים אמיתיים.
+מקור ב' — RentCast, אוטומטי, רישוי נקי, 50 בקשות בחודש חינם. 12 זיפים = 12 בקשות.
+    ה-snapshot של כל זיפ (data/rentcast/{יום}_{זיפ}.json) משמש שוב עד 6 ימים ⇒ ריצה שבועית = 12
+    בקשות, וכל ריצה נוספת באותו שבוע חינם. --fresh מושך מחדש. מונה הבקשות ב-rentcast_quota.json
+    (שורש הריפו) עוצר לפני הבקשה שתחרוג מ-50; מעל זה = תשלום ⇒ רק אחרי שדרוג ב-rentcast.io
+    ועם --limit N מפורש. מפתח ב-RENTCAST_API_KEY (.env). אומת 6.9.2026: 913 מודעות ב-12 זיפים.
+    🔴 `history` של RentCast = רישומים חוזרים (כל עלייה מחדש ל-MLS), לא הורדות מחיר בתוך מודעה —
+    כאלה אין ב-API. ↓N = נרשם מחדש N פעמים במחיר נמוך יותר · DOM מצטבר = כל הרישומים יחד
+    (ה-DOM הנוכחי מתאפס ברישום מחדש ומסתיר את התקועות באמת: 2442 Guilford, DOM 14, מצטבר 408).
 
     python3 listings.py                    # אוסף redfin_*.csv מ-Downloads (30 יום) אל data/redfin/ ומריץ הכל
-    python3 listings.py --dom 90 --cuts 2  # ערוץ הרכישה: תקועות מעל 90 יום עם 2 הורדות מחיר (RentCast)
+    python3 listings.py --rentcast --dom 90 --cuts 2   # השבועי: DOM מצטבר ≥ 90 ונרשם מחדש פעמיים בזול יותר
     python3 listings.py --min-arv 0 --max-offer 9e9   # לבטל את ברירות המחדל: ARV ≥ $200K, הצעה ≤ $350K
     python3 listings.py --comps "8058 CHERRYBARK"     # הקומפס של מודעה אחת, לעין אנושית
     python3 listings.py some.csv other.csv # קבצים מפורשים
-    python3 listings.py --rentcast         # 12 זיפי היעד מ-RentCast
+    python3 listings.py --rentcast         # 12 זיפי היעד מ-RentCast (snapshot מהשבוע = 0 בקשות)
+    python3 listings.py --rentcast --fresh --limit 500   # למשוך מחדש בתוך השבוע · --limit רק אחרי שדרוג בתשלום
     python3 listings.py selftest
 
 רק 12 זיפי היעד (`sdf.TARGET`) נחתמים. מודעה מחוץ להם נספרת ומדולגת — קומפס לזיפ
@@ -102,10 +107,11 @@ def read_redfin(paths):
             if g("sale") and "MLS" not in g("sale").upper():   # PAST SALE — ייצוא של מכירות
                 skipped[g("sale")] += 1
                 continue
+            dom = _num(g("dom"))
             out.append({"address": g("address"), "zip": g("zip")[:5], "price": _num(g("price")),
-                        "sqft": _num(g("sqft")), "year": _num(g("year")), "dom": _num(g("dom")),
+                        "sqft": _num(g("sqft")), "year": _num(g("year")), "dom": dom,
                         "lat": lat, "lon": lon, "url": g("url"), "status": g("status"),
-                        "mls": g("mls"), "cuts": None})
+                        "mls": g("mls"), "cuts": None, "lists": 1, "dom_total": dom or 0, "drop": None})
     seen, uniq = set(), []                      # חיפושים חופפים / שבועות עוקבים -> אותה מודעה פעמיים. הראשון = החדש
     for L in out:
         if (L["address"].upper(), L["zip"]) not in seen:
@@ -147,52 +153,99 @@ def _api_key():
     return key
 
 
-def read_rentcast(zips=sdf.TARGET):
+QUOTA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rentcast_quota.json")
+RENTCAST_FREE = 50          # התוכנית החינמית (Developer). מעל זה — שדרוג בתשלום ב-rentcast.io
+SNAPSHOT_DAYS = 6           # snapshot צעיר מזה = אותו שבוע ⇒ משמש שוב בלי בקשה. "לא יותר מפעם בשבוע"
+
+
+def _quota(add=0):
+    """מונה בקשות RentCast לחודש הנוכחי. בשורש הריפו, לא ב-data/ (שנמחק בבטחה). add = לרשום בקשות."""
+    q = json.load(open(QUOTA_FILE, encoding="utf-8")) if os.path.exists(QUOTA_FILE) else {}
+    m = time.strftime("%Y-%m")
+    if add:
+        q[m] = q.get(m, 0) + add
+        with open(QUOTA_FILE, "w", encoding="utf-8") as f:
+            json.dump(q, f, indent=1)
+    return q.get(m, 0)
+
+
+def _guard(need, limit=RENTCAST_FREE):
+    """עוצר לפני הבקשה הראשונה אם הריצה תחרוג מהמכסה. מעל 50 = תשלום ⇒ רק עם --limit מפורש."""
+    used, m = _quota(), time.strftime("%Y-%m")
+    print(f"  RentCast: {used}/{limit} בקשות ב-{m}"
+          + (f" · הריצה הזו {need} ⇒ {used + need}/{limit}" if need else " · הכל מה-snapshot, 0 בקשות"),
+          file=sys.stderr)
+    if used + need > limit:
+        sys.exit(f"🛑 RentCast: {used}/{limit} בקשות ב-{m}, הריצה הזו צריכה עוד {need} ⇒ {used + need} > {limit}. "
+                 f"עצרתי לפני הבקשה הראשונה.\n"
+                 f"   בלי --fresh, snapshot מהשבוע האחרון משמש חינם. המכסה החינמית מתחדשת ב-1 לחודש.\n"
+                 f"   תשלום: לשדרג תוכנית ב-app.rentcast.io (~$74/ח' לפי decisions.md) ורק אז --limit N.")
+
+
+def read_rentcast(zips=sdf.TARGET, fresh=False, limit=RENTCAST_FREE):
     """
-    12 זיפים = 12 בקשות. המכסה החינמית 50 בחודש ⇒ ריצה שבועית = 48. לכן התשובה
-    הגולמית נשמרת ב-data/rentcast/{יום}_{זיפ}.json: הרצה חוזרת באותו יום חינם,
-    ושבוע על שבוע נצברת היסטוריית מחירים. אומת 6.9.2026: 913 מודעות ב-12 זיפים.
+    12 זיפים = 12 בקשות. התשובה הגולמית נשמרת ב-data/rentcast/{יום}_{זיפ}.json, וה-snapshot האחרון
+    של כל זיפ משמש שוב עד SNAPSHOT_DAYS ימים — הריצה השבועית עולה 12 בקשות, וכל ריצה נוספת
+    באותו שבוע חינם. --fresh מושך מחדש. המונה נבדק לפני הבקשה הראשונה ונרשם לפני כל שליחה.
     """
-    key, out = _api_key(), []
     snap = os.path.join(sdf.DATA, "rentcast")
     os.makedirs(snap, exist_ok=True)
+    have = {}
     for z in zips:
-        path = os.path.join(snap, f"{time.strftime('%Y-%m-%d')}_{z}.json")
-        if os.path.exists(path):
-            with open(path, encoding="utf-8") as f:
+        files = sorted(glob.glob(os.path.join(snap, f"*_{z}.json")))
+        if files and not fresh:
+            day = os.path.basename(files[-1])[:10]
+            if time.time() - time.mktime(time.strptime(day, "%Y-%m-%d")) < SNAPSHOT_DAYS * 86400:
+                have[z] = files[-1]
+    _guard(len(zips) - len(have), limit)
+    key = _api_key() if len(have) < len(zips) else None
+    out = []
+    for z in zips:
+        if z in have:
+            with open(have[z], encoding="utf-8") as f:
                 data = json.load(f)
-            out.extend(_from_rentcast(L) for L in data)
-            print(f"  RentCast {z}: {len(data)} מודעות (מהשמירה של היום)", file=sys.stderr)
-            continue
-        q = urlencode({"zipCode": z, "status": "Active", "propertyType": "Single Family", "limit": 500})
-        req = Request(f"{RENTCAST_URL}?{q}", headers={"X-Api-Key": key, "Accept": "application/json"})
-        try:
-            with urlopen(req, timeout=60) as r:
-                data = json.loads(r.read().decode("utf-8"))
-            with open(path, "w", encoding="utf-8") as f:
+            print(f"  RentCast {z}: {len(data)} מודעות (snapshot {os.path.basename(have[z])[:10]})", file=sys.stderr)
+        else:
+            q = urlencode({"zipCode": z, "status": "Active", "propertyType": "Single Family", "limit": 500})
+            req = Request(f"{RENTCAST_URL}?{q}", headers={"X-Api-Key": key, "Accept": "application/json"})
+            _quota(1)                                    # נרשם לפני השליחה — שמרני
+            try:
+                with urlopen(req, timeout=60) as r:
+                    data = json.loads(r.read().decode("utf-8"))
+            except HTTPError as e:
+                body = e.read().decode("utf-8", "replace")[:300]
+                if e.code == 403 and "subscription-inactive" in body:
+                    _quota(-1)
+                    sys.exit("⚠️ המפתח קיים אבל התוכנית לא הופעלה. ב-app.rentcast.io/app/api לבחור את תוכנית "
+                             "Developer (חינם, 50 בקשות בחודש) ולהפעיל אותה — ואז להריץ שוב. הבקשה לא נספרה במכסה.")
+                if e.code == 429:
+                    sys.exit("⚠️ נגמרה המכסה החודשית של RentCast (50 בקשות). מתחדשת בתחילת החודש, או להעלות תוכנית.")
+                sys.exit(f"⚠️ RentCast החזיר {e.code}: {body}")
+            with open(os.path.join(snap, f"{time.strftime('%Y-%m-%d')}_{z}.json"), "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
-        except HTTPError as e:
-            body = e.read().decode("utf-8", "replace")[:300]
-            if e.code == 403 and "subscription-inactive" in body:
-                sys.exit("⚠️ המפתח קיים אבל התוכנית לא הופעלה. ב-app.rentcast.io/app/api לבחור את תוכנית "
-                         "Developer (חינם, 50 בקשות בחודש) ולהפעיל אותה — ואז להריץ שוב. הבקשה לא נספרה במכסה.")
-            if e.code == 429:
-                sys.exit("⚠️ נגמרה המכסה החודשית של RentCast (50 בקשות). מתחדשת בתחילת החודש, או להעלות תוכנית.")
-            sys.exit(f"⚠️ RentCast החזיר {e.code}: {body}")
+            print(f"  RentCast {z}: {len(data)} מודעות (חדש)", file=sys.stderr)
         out.extend(_from_rentcast(L) for L in data)
-        print(f"  RentCast {z}: {len(data)} מודעות", file=sys.stderr)
     return out, Counter()
 
 
 def _from_rentcast(L):
+    """
+    🔴 `history` = אירועי רישום ("Sale Listing"), אחד לכל עלייה ל-MLS — לא הורדות מחיר. אומת 7.9.2026:
+    641 E 33rd St נרשם 7/2024 ($259K, 270 יום), 5/2025 ($242.5K, 206), 4/2026 ($238K, 154). לכן:
+    cuts = רישומים חוזרים במחיר נמוך יותר · dom_total = DOM של הרישומים שנסגרו + הנוכחי · drop = מהמבוקש הראשון.
+    """
     hist = sorted((L.get("history") or {}).items())
     prices = [h.get("price") for _, h in hist if h.get("price")]
     cuts = sum(1 for a, b in zip(prices, prices[1:]) if b < a) if len(prices) > 1 else None
+    dom, price = L.get("daysOnMarket"), L.get("price")
+    past = sum(h.get("daysOnMarket") or 0 for _, h in hist if h.get("removedDate"))
     return {"address": L.get("formattedAddress") or L.get("addressLine1") or "",
-            "zip": str(L.get("zipCode") or "")[:5], "price": L.get("price"),
-            "sqft": L.get("squareFootage"), "year": L.get("yearBuilt"), "dom": L.get("daysOnMarket"),
+            "zip": str(L.get("zipCode") or "")[:5], "price": price,
+            "sqft": L.get("squareFootage"), "year": L.get("yearBuilt"), "dom": dom,
             "lat": L.get("latitude"), "lon": L.get("longitude"), "url": "",
-            "status": L.get("status"), "mls": L.get("mlsNumber"), "cuts": cuts}
+            "status": L.get("status"), "mls": L.get("mlsNumber"), "cuts": cuts,
+            "lists": max(1, len(hist)), "dom_total": past + (dom or 0),
+            "drop": (price / prices[0] - 1) if price and prices and prices[0] else None}
 
 
 # ──────────────────────── שווי שומה מרשומות השומה ────────────────────────
@@ -260,6 +313,15 @@ def score(L, band, reno, parcel, ppsf_zip=None, nearest=None):
             "rrp": bool(L["year"] and L["year"] < 1978)}
 
 
+def _not_stuck(L, dom_min, cuts_min):
+    """למה המודעה לא "תקועה" לפי הסף — או None. DOM מצטבר על כל הרישומים; cuts = רישומים חוזרים בזול יותר."""
+    if dom_min and (L.get("dom_total") or L["dom"] or 0) < dom_min:
+        return f"DOM מצטבר < {dom_min:.0f}"
+    if cuts_min and (L["cuts"] or 0) < cuts_min:
+        return f"פחות מ-{cuts_min:.0f} רישומים חוזרים בזול יותר"
+    return None
+
+
 def underwrite(listings, dom_min=0, comps_for=None, min_arv=200_000, max_offer=350_000, cuts_min=0):
     zips = set(sdf.TARGET)
     sales, loc = arv.market()
@@ -272,7 +334,7 @@ def underwrite(listings, dom_min=0, comps_for=None, min_arv=200_000, max_offer=3
             ppsf[L["zip"]].append(L["price"] / L["sqft"])
     ppsf = {z: st.median(v) for z, v in ppsf.items()}
     todo = [L for L in listings if L["zip"] in zips and L["price"] and L["lat"]
-            and (not dom_min or (L["dom"] or 0) >= dom_min)
+            and not _not_stuck(L, dom_min, cuts_min)
             and f"{L['address']}|{L['zip']}".upper() not in cache]
     if todo:                                   # שווי שומה: 4 במקביל, ~0.5 שנייה למודעה
         print(f"  שולף שווי שומה ל-{len(todo)} מודעות חדשות (~{len(todo) * 0.45 / 60:.0f} דקות, פעם אחת)...",
@@ -288,8 +350,9 @@ def underwrite(listings, dom_min=0, comps_for=None, min_arv=200_000, max_offer=3
         if L["zip"] not in zips:
             skipped["מחוץ ל-12 זיפי היעד"] += 1
             continue
-        if dom_min and (L["dom"] or 0) < dom_min:
-            skipped[f"DOM < {dom_min:.0f}"] += 1
+        why = _not_stuck(L, dom_min, cuts_min)
+        if why:
+            skipped[why] += 1
             continue
         if not L["price"] or not L["lat"]:
             skipped["בלי מחיר/קואורדינטות"] += 1
@@ -314,9 +377,6 @@ def underwrite(listings, dom_min=0, comps_for=None, min_arv=200_000, max_offer=3
         row = score(L, b, arv.reno_budget(L["sqft"], L["year"]), p, ppsf.get(L["zip"]), nearest)
         if row["offer_rule"] > max_offer:      # מעל ההון לסלוט אחד
             skipped[f"הצעת הכלל מעל ${max_offer/1e3:.0f}K"] += 1
-            continue
-        if cuts_min and (L["cuts"] or 0) < cuts_min:
-            skipped[f"פחות מ-{cuts_min:.0f} הורדות מחיר"] += 1
             continue
         rows.append(row)
     with open(AV_CACHE, "w", encoding="utf-8") as f:
@@ -351,14 +411,15 @@ def print_table(rows, skipped, today, show_all=False):
     print(f"\n{len(rows)} מודעות נחתמו · נתוני מכר עד {today} · ממוין לפי הפער בין המבוקש להצעת הכלל ({R})")
     if skipped:
         print("דולגו: " + " · ".join(f"{k} {v}" for k, v in skipped.most_common()))
-    hdr = (f"{'ZIP':<7}{'כלל':>5}{'מבוקש':>10}{'DOM':>5}{'sqft':>7}{'שנה':>6}{'ARV':>10}{'הכלל מתיר':>10}"
+    hdr = (f"{'ZIP':<7}{'כלל':>5}{'מבוקש':>10}{'DOM':>5}{'מצטבר':>7}{'sqft':>7}{'שנה':>6}{'ARV':>10}{'הכלל מתיר':>10}"
            f"{'פער':>6}{'רווח@כלל':>10}{'רווח@מבוקש':>12}{'שומה':>11}{'n':>3}  כתובת")
     print("\n" + hdr)
-    print("-" * 111)
+    print("-" * 118)
     for r in rows if show_all else rows[:40]:
-        tag = ((" ⚠️RRP" if r["rrp"] else "") + (f" ↓{r['cuts']}" if r.get("cuts") else "")
+        tag = ((" ⚠️RRP" if r["rrp"] else "")
+               + (f" ↓{r['cuts']}" + (f" {r['drop']:.0%}" if r.get("drop") else "") if r.get("cuts") else "")
                + (" 🚩" + "/".join(r["flags"]) if r["flags"] else ""))
-        print(f"{r['zip']:<7}{r['rule']:>5.0%}{r['price']:>10,.0f}{_f(r['dom'], 5)}{_f(r['sqft'], 7)}{_f(r['year'], 6)}"
+        print(f"{r['zip']:<7}{r['rule']:>5.0%}{r['price']:>10,.0f}{_f(r['dom'], 5)}{_f(r.get('dom_total'), 7)}{_f(r['sqft'], 7)}{_f(r['year'], 6)}"
               f"{r['arv']:>10,.0f}{r['offer_rule']:>10,.0f}{r['gap']:>6.0%}{r['profit_rule']:>10,.0f}"
               f"{r['profit_ask']:>12,.0f}{_f(r['av'], 11)}{r['n']:>3}  {r['address'].split(',')[0][:28]}{tag}")
     if not show_all and len(rows) > 40:
@@ -367,6 +428,8 @@ def print_table(rows, skipped, today, show_all=False):
 פער      = כמה מתחת למבוקש צריך לקנות כדי לעמוד בכלל ({R}). מתחת ל-15% על מודעה תקועה — יש שיחה.
 רווח     = תרחיש תחתון (ARV − לפי שכבה: BUY BOX {arv.ERR['BUY'][0]:.1%}, צפון {arv.ERR['NORTH'][0]:.1%}), מזומן מלא, {arv.MONTHS_DEFAULT} ח'. @כלל = בהצעת הכלל; @מבוקש = במחיר מלא.
 שיפוץ    = sqft × ${arv.RENO_SQFT} (+${arv.RENO_PRE78} לפני 1978, ⚠️RRP) × {1 + arv.RENO_RESERVE:.2f}. בלי sqft: ${arv.RENO_DEFAULT:,}.
+מצטבר   = DOM על כל הרישומים החוזרים יחד. ה-DOM הנוכחי מתאפס ברישום מחדש ומסתיר תקועות — --dom מסנן על המצטבר.
+↓N       = נרשם מחדש N פעמים במחיר נמוך יותר, ואחריו הירידה מהמבוקש הראשון. (history של RentCast = רישומים, לא הורדות מחיר)
 שומה '—' = לא נמצאה ברשומות השומה ⇒ קומפס בלי סינון גודל, טווח רחב יותר.
 🚩ARV     = ARV לרגל גבוה פי 1.7+ מהמבוקש החציוני בזיפ — הקומפס גדולים מהבית. 🚩שומה = שומה של מגרש, בית הרוס.
 🚩רחוב    = השכן הצמוד (≤150 מ') נמכר 20%+ מתחת לאומדן — כיס של בתים קטנים, התקרה קרובה לשכן. כל המסומנים ממוינים לסוף.
@@ -411,6 +474,7 @@ def selftest():
     L = rows[0]
     assert L["price"] == 289_900 and L["sqft"] == 1_442 and L["year"] == 1961 and L["dom"] == 112
     assert L["zip"] == "46236" and abs(L["lat"] - 39.902098) < 1e-6 and L["url"].startswith("https://")
+    assert L["dom_total"] == 112 and L["lists"] == 1 and L["cuts"] is None and L["drop"] is None
 
     # ציון: הצעת הכלל על האומדן, פער מהמבוקש, רווח בתרחיש התחתון
     band = {"arv": 301_000, "low": 301_000 * (1 - arv.ERR["BUY"][0]), "n": 10}
@@ -445,14 +509,37 @@ def selftest():
     finally:
         os.remove(f2.name)
     assert len(rows2) == 1 and skipped2["כפולים"] == 1, (len(rows2), skipped2)
-    # RentCast: מיפוי שדות והורדות מחיר מההיסטוריה
+    # RentCast: history = רישומים חוזרים. cuts = כמה פעמים נרשם מחדש בזול יותר, DOM מצטבר = שנסגרו + הנוכחי
     R = _from_rentcast({"formattedAddress": "1 A St, Indianapolis, IN 46236", "zipCode": 46236,
                         "price": 250000, "squareFootage": 1500, "yearBuilt": 1985, "daysOnMarket": 95,
                         "latitude": 39.9, "longitude": -85.9,
-                        "history": {"2026-05-01": {"price": 270000}, "2026-06-01": {"price": 260000},
-                                    "2026-07-01": {"price": 250000}}})
+                        "history": {"2026-05-01": {"price": 270000, "daysOnMarket": 20, "removedDate": "2026-05-21"},
+                                    "2026-06-01": {"price": 260000, "daysOnMarket": 25, "removedDate": "2026-06-26"},
+                                    "2026-07-01": {"price": 250000, "daysOnMarket": 95, "removedDate": None}}})
     assert R["cuts"] == 2 and R["price"] == 250000 and R["zip"] == "46236" and R["dom"] == 95
-    assert _from_rentcast({"price": 1})["cuts"] is None
+    assert R["lists"] == 3 and R["dom_total"] == 140 and abs(R["drop"] - (250000 / 270000 - 1)) < 1e-9
+    R1 = _from_rentcast({"price": 1})
+    assert R1["cuts"] is None and R1["lists"] == 1 and R1["dom_total"] == 0 and R1["drop"] is None
+    # "תקוע" נמדד על המצטבר: DOM נוכחי 14 עם 408 מצטבר עובר; 60 מצטבר לא; רישום חוזר אחד לא מספיק ל---cuts 2
+    assert _not_stuck({"dom": 14, "dom_total": 408, "cuts": 2}, 90, 2) is None
+    assert _not_stuck({"dom": 14, "dom_total": 60, "cuts": 2}, 90, 2).startswith("DOM")
+    assert _not_stuck({"dom": 200, "dom_total": 200, "cuts": 1}, 90, 2).startswith("פחות")
+    assert _not_stuck({"dom": 200, "cuts": None}, 90, 0) is None      # Redfin בלי dom_total
+    # מונה המכסה: נצבר לחודש, ו-_guard עוצר לפני הבקשה שתחרוג מ-50 — אלא אם הועלה --limit
+    global QUOTA_FILE
+    orig, QUOTA_FILE = QUOTA_FILE, os.path.join(tempfile.mkdtemp(), "q.json")
+    try:
+        assert _quota() == 0 and _quota(12) == 12 and _quota(12) == 24 and _quota() == 24
+        _guard(12, 50)                                   # 36 ≤ 50
+        try:
+            _guard(27, 50)
+            assert False, "היה צריך לעצור: 51 > 50"
+        except SystemExit:
+            pass
+        _guard(27, 100)                                  # אחרי שדרוג, עם --limit
+        assert _quota() == 24                            # _guard לא רושם — רק השליחה
+    finally:
+        QUOTA_FILE = orig
     print("selftest: ok")
 
 
@@ -469,7 +556,7 @@ if __name__ == "__main__":
     min_arv, max_offer = opt("--min-arv", 200_000), opt("--max-offer", 350_000)
     comps_for = args[args.index("--comps") + 1] if "--comps" in args else None
     if "--rentcast" in args:
-        listings, skipped = read_rentcast()
+        listings, skipped = read_rentcast(fresh="--fresh" in args, limit=int(opt("--limit", RENTCAST_FREE)))
     else:
         paths = [a for a in args if a.lower().endswith(".csv")]
         if not paths:

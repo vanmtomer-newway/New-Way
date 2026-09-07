@@ -1,9 +1,9 @@
 # דרך חדשה — מערכת החיתום
 
-**Last update:** 2026-09-06
-**Changed:** סשן ארוך אחד (6.9.2026): ביקורת מקצה לקצה, ואז נבנו ואומתו — `listings.py` עם
-RentCast (913 מודעות פעילות ב-12 זיפי יעד), שכבה צפונית, כלל 72%/69% לפי שכבה, שגיאת ARV לפי
-שכבה, יומן חיתום, מתחרים מהנתונים, סינון בנייה חדשה, 6 תיקוני אקסל; הליד הראשון נבדק ונדחה.
+**Last update:** 2026-09-07
+**Changed:** 7.9.2026: התברר ש-`history` של RentCast הוא רישומים חוזרים ולא הורדות מחיר — `listings.py`
+מודד עכשיו "תקוע" לפי DOM מצטבר ורישומים חוזרים בזול יותר, משתמש ב-snapshot לשבוע, ומונה בקשות
+עם עצירה קשה ב-50 (`rentcast_quota.json`, 24/50 בספטמבר). הריצה השבועית הראשונה: ליד אחד (3236 Central Ave).
 **איפה ממשיכים:** `CLAUDE.md` § "📍 איפה אנחנו" · `tasks/todo.md` § "▶ להמשיך מכאן".
 
 | | |
@@ -11,7 +11,7 @@ RentCast (913 מודעות פעילות ב-12 זיפי יעד), שכבה צפו�
 | **Status** | 🟢 הכל עובד על 12 זיפי היעד. ARV לפי שכבה: BUY BOX ±12.4%, צפון ±18.7% · כלל 72%/69% לפי שכבה · `listings.py --rentcast` אומת על 913 מודעות · Redfin CSV כגיבוי. פוש ידני ע"י תומר |
 | **Where** | `~/Projects/New-Way` |
 | **Running** | ❌ כלום לא רץ ברקע. הכל ידני, לפי דרישה |
-| **Depends on** | Python 3 (ספריית תקן בלבד). `RENTCAST_API_KEY` ב-`.env` (חינם, 50 בקשות/חודש) ל-`listings.py --rentcast`; בלעדיו — CSV של Redfin |
+| **Depends on** | Python 3 (ספריית תקן בלבד). `RENTCAST_API_KEY` ב-`.env` (חינם, 50 בקשות/חודש) ל-`listings.py --rentcast`; בלעדיו — CSV של Redfin. המונה ב-`rentcast_quota.json` (שורש, לא ב-git) |
 
 ## פקודות
 
@@ -33,8 +33,9 @@ python3 arv.py deal "6259 Chadworth Court" --offer 241469   # טווח הרוו�
 python3 arv.py backtest    # מוכיח את הדיוק — ~18 שניות
 
 # 👇 חיתום בכמות — מודעות פעילות מ-Redfin ("Download All" בתחתית החיפוש → Downloads)
-python3 listings.py --rentcast --dom 90 --cuts 2             # 👈 השבועי: תקועות עם 2 הורדות מחיר. 12 בקשות מתוך 50 בחודש
-python3 listings.py --rentcast --comps "6376 Village Oak"    # הקומפס של ליד, בעיניים. חינם באותו יום (snapshot)
+python3 listings.py --rentcast --dom 90 --cuts 2             # 👈 השבועי: DOM מצטבר ≥90 + נרשם מחדש פעמיים בזול יותר. מדפיס "24/50 בקשות", עוצר לפני 50
+python3 listings.py --rentcast --comps "3236 Central Ave"    # הקומפס של ליד, בעיניים. חינם באותו שבוע (snapshot)
+python3 listings.py --rentcast --fresh                        # למשוך מחדש בתוך השבוע (12 בקשות). --limit N רק אחרי שדרוג בתשלום
 python3 listings.py                                          # או מ-CSV של Redfin ב-Downloads
 python3 listings.py --dom 30                                 # רק מודעות שיושבות מעל 30 יום
 python3 listings.py --comps "646 E 51ST ST"                  # הקומפס של מודעה אחת
@@ -61,7 +62,8 @@ python3 arv.py selftest && python3 listings.py selftest` — ארבעה `ok` = �
 - `arv.py` — **חיתום נכס בודד.** קומפס גאוגרפיים + טווח רווח, לא מספר בודד
 - `listings.py` — **חיתום בכמות.** CSV של Redfin (או RentCast) → כל המודעות
   ב-12 זיפי היעד ממוינות לפי הפער מהצעת ה-72%. `.env.example` — שם המפתח האופציונלי
-- `underwriting_log.csv` — **יומן החיתום.** כל הרצת `arv.py deal`. עמודת `outcome` ידנית. לא למחוק
+- `underwriting_log.csv` — **יומן החיתום.** כל הרצת `arv.py deal` ו-`listings.py --comps`. עמודת `outcome` ידנית. לא למחוק
+- `rentcast_quota.json` — **מונה בקשות RentCast לחודש.** לא ב-git. אם נמחק — לזרוע מחדש מהמספר ב-app.rentcast.io
 - `docs/בדיקה_זיפים_צפוניים.md` — **למה 46220/46205/46260/46240 נוספו**, ומה שונה שם בפרודקט
 - `docs/מסנן_החיתום_ומתחרים.md` — **התשובות המלאות.** למה 16%, איך מרחיבים,
   המודל העסקי של כל מתחרה, ואזהרות הנתונים

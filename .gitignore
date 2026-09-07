@@ -15,3 +15,6 @@ credentials*.json
 
 # קבצי נעילה של Excel
 ~$*
+
+# מונה בקשות RentCast — מצב מקומי של המפתח של תומר, משתנה בכל ריצה. הקלאוד בלי מפתח ממילא
+rentcast_quota.json
