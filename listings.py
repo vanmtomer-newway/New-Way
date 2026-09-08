@@ -289,7 +289,7 @@ def parcel_av(address, zip5, cache):
 
 # ─────────────────────────────── החיתום ───────────────────────────────
 
-def score(L, band, reno, parcel, ppsf_zip=None, nearest=None):
+def score(L, band, reno, parcel, ppsf_zip=None, nearest=None, street_med=None):
     """
     כל המספרים של שורה אחת. פונקציה טהורה — זו שנבדקת ב-selftest.
     דגלים (מהריצה האמיתית הראשונה, 6.9.2026): 'ARV' — ARV לרגל גבוה פי 1.7+ מהמבוקש
@@ -303,8 +303,11 @@ def score(L, band, reno, parcel, ppsf_zip=None, nearest=None):
         flags.append("ARV")
     if parcel.get("av") and parcel["av"] < 40_000:
         flags.append("שומה")
-    if nearest and nearest[0] <= 0.15 and nearest[1] < 0.8 * band["arv"]:
-        flags.append("רחוב")           # השכן הצמוד נמכר 20%+ מתחת לאומדן — כיס של בתים קטנים (Village Oak, 6.9.2026)
+    # הרחוב אומר פחות מהאומדן: השכן הצמוד 20%+ מתחת (Village Oak, 6.9), או חציון הקומפס
+    # מאותו רחוב 10%+ מתחת (3236 Central: קומפס מ-New Jersey/Delaware ניפחו ב-16%, 7.9).
+    if ((nearest and nearest[0] <= 0.15 and nearest[1] < 0.8 * band["arv"])
+            or (street_med and street_med < 0.90 * band["arv"])):
+        flags.append("רחוב")
     return {**L, "arv": band["arv"], "low": band["low"], "n": band["n"], "reno": reno, "rule": rule, "flags": flags,
             "offer_rule": offer, "gap": (L["price"] - offer) / L["price"],
             "profit_rule": arv.deal(band["low"], offer, reno, zip5=L["zip"])["profit"],
@@ -364,9 +367,11 @@ def underwrite(listings, dom_min=0, comps_for=None, min_arv=200_000, max_offer=3
             skipped["בלי קומפס"] += 1
             continue
         nearest = (arv._km((L["lat"], L["lon"]), comps[0]["ll"]), comps[0]["price"])
+        same = [c["price"] for c in comps if _street(c["address"])[1] == _street(L["address"])[1]]
+        street_med = st.median(same) if same else None
         if comps_for and comps_for.upper() in L["address"].upper():
             _print_comps(L, comps, b, p)
-            row = score(L, b, arv.reno_budget(L["sqft"], L["year"]), p, ppsf.get(L["zip"]), nearest)
+            row = score(L, b, arv.reno_budget(L["sqft"], L["year"]), p, ppsf.get(L["zip"]), nearest, street_med)
             arv._log({"address": L["address"].split(",")[0], "zip": L["zip"], "parcel": p.get("parcel", "")},
                      b, row["offer_rule"], row["reno"], f"{L['sqft']:,.0f} sqft" if L["sqft"] else "ברירת מחדל",
                      arv.MONTHS_DEFAULT, arv.deal(b["low"], row["offer_rule"], row["reno"], zip5=L["zip"]),
@@ -374,7 +379,7 @@ def underwrite(listings, dom_min=0, comps_for=None, min_arv=200_000, max_offer=3
         if b["arv"] < min_arv:                 # מתחת ל-$200K ATTOM מודדת הפסד — לא הפרודקט
             skipped[f"ARV מתחת ל-${min_arv/1e3:.0f}K"] += 1
             continue
-        row = score(L, b, arv.reno_budget(L["sqft"], L["year"]), p, ppsf.get(L["zip"]), nearest)
+        row = score(L, b, arv.reno_budget(L["sqft"], L["year"]), p, ppsf.get(L["zip"]), nearest, street_med)
         if row["offer_rule"] > max_offer:      # מעל ההון לסלוט אחד
             skipped[f"הצעת הכלל מעל ${max_offer/1e3:.0f}K"] += 1
             continue
@@ -397,6 +402,11 @@ def _print_comps(L, comps, b, p):
     if d0 <= 0.15 and p0 < 0.8 * b["arv"]:
         print(f"🚩 השכן הצמוד ({d0*1000:.0f} מ') נמכר ב-${p0:,.0f} — {1 - p0/b['arv']:.0%} מתחת לאומדן. "
               f"כיס של בתים קטנים? התקרה כנראה קרובה ל-${p0:,.0f}, לא ל-${b['arv']:,.0f}.")
+    same = [c["price"] for c in comps if _street(c["address"])[1] == _street(L["address"])[1]]
+    if same and st.median(same) < 0.90 * b["arv"]:
+        print(f"🚩 {len(same)} קומפס מאותו רחוב: חציון ${st.median(same):,.0f} — "
+              f"{1 - st.median(same)/b['arv']:.0%} מתחת לאומדן שנשען על הרחובות השכנים. "
+              f"בשכונה שמתומחרת לפי רחוב, זה המספר.")
 
 
 def _f(v, w, money=False):
@@ -432,7 +442,7 @@ def print_table(rows, skipped, today, show_all=False):
 ↓N       = נרשם מחדש N פעמים במחיר נמוך יותר, ואחריו הירידה מהמבוקש הראשון. (history של RentCast = רישומים, לא הורדות מחיר)
 שומה '—' = לא נמצאה ברשומות השומה ⇒ קומפס בלי סינון גודל, טווח רחב יותר.
 🚩ARV     = ARV לרגל גבוה פי 1.7+ מהמבוקש החציוני בזיפ — הקומפס גדולים מהבית. 🚩שומה = שומה של מגרש, בית הרוס.
-🚩רחוב    = השכן הצמוד (≤150 מ') נמכר 20%+ מתחת לאומדן — כיס של בתים קטנים, התקרה קרובה לשכן. כל המסומנים ממוינים לסוף.
+🚩רחוב    = הרחוב אומר פחות: השכן הצמוד (≤150 מ') 20%+ מתחת לאומדן, או חציון הקומפס מאותו רחוב 10%+ מתחת. כל המסומנים ממוינים לסוף.
 מסוננים  = ARV מתחת ל-$200K (מדרגת ההפסד של ATTOM) והצעת כלל מעל $350K (ההון לסלוט אחד). --min-arv / --max-offer לשנות.
 🔴 ARV הוא חציון קומפס, לא מספר. לפני הצעה: --comps "<כתובת>" ולהסתכל בעיניים.""")
     links = [r for r in rows[:15] if r.get("url")]
@@ -495,6 +505,10 @@ def selftest():
     assert score(L, band, reno, {}, 150, nearest=(0.05, 190_000))["flags"] == ["רחוב"]
     assert score(L, band, reno, {}, 150, nearest=(0.05, 280_000))["flags"] == []
     assert score(L, band, reno, {}, 150, nearest=(0.5, 190_000))["flags"] == []
+    # ...או חציון הקומפס מאותו רחוב 10%+ מתחת לאומדן (3236 Central: $294K מול $342.5K = −14%)
+    assert score(L, band, reno, {}, 150, street_med=294_000 / 342_500 * 301_000)["flags"] == ["רחוב"]
+    assert score(L, band, reno, {}, 150, street_med=0.95 * 301_000)["flags"] == []
+    assert score(L, band, reno, {}, 150, nearest=(0.5, 190_000), street_med=None)["flags"] == []
     # רחוב: מדלגים על קידומת כיוון; כתובת בלי מספר לא נשלחת לשרת
     assert _street("5302 N ARLINGTON AVE") == ("5302", "ARLINGTON")
     assert _street("8058 Cherrybark Dr.") == ("8058", "CHERRYBARK")
