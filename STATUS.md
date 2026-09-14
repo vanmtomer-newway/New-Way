@@ -35,7 +35,7 @@ python3 arv.py deal "6259 Chadworth Court" --offer 241469   # טווח הרוו�
 python3 arv.py backtest    # מוכיח את הדיוק — ~18 שניות
 
 # 👇 חיתום בכמות — מודעות פעילות מ-Redfin ("Download All" בתחתית החיפוש → Downloads)
-python3 listings.py --rentcast --dom 90 --cuts 2             # 👈 השבועי: DOM מצטבר ≥90 + נרשם מחדש פעמיים בזול יותר. מדפיס "24/50 בקשות", עוצר לפני 50
+python3 listings.py --rentcast --dom 90 --cuts 2             # 👈 השבועי: DOM מצטבר ≥90 + נרשם מחדש פעמיים בזול יותר. מדפיס את מצב המכסה, עוצר לפני 50
 python3 listings.py --rentcast --comps "3236 Central Ave"    # הקומפס של ליד, בעיניים. חינם באותו שבוע (snapshot)
 python3 listings.py --rentcast --fresh                        # למשוך מחדש בתוך השבוע (12 בקשות). --limit N רק אחרי שדרוג בתשלום
 python3 listings.py                                          # או מ-CSV של Redfin ב-Downloads
