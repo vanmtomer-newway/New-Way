@@ -156,6 +156,8 @@ def _api_key():
 QUOTA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rentcast_quota.json")
 RENTCAST_FREE = 50          # התוכנית החינמית (Developer). מעל זה — שדרוג בתשלום ב-rentcast.io
 SNAPSHOT_DAYS = 6           # snapshot צעיר מזה = אותו שבוע ⇒ משמש שוב בלי בקשה. "לא יותר מפעם בשבוע"
+MAX_YEAR = 2000             # בית שנבנה מ-2000 ואילך אינו מועמד לשיפוץ — מלאי קבלנים שנרשם מחדש (14.9.2026).
+                            # שנה חסרה עוברת: לא מפילים ליד אפשרי על שדה ריק. --max-year לשנות
 
 
 def _quota(add=0):
@@ -316,8 +318,10 @@ def score(L, band, reno, parcel, ppsf_zip=None, nearest=None, street_med=None):
             "rrp": bool(L["year"] and L["year"] < 1978)}
 
 
-def _not_stuck(L, dom_min, cuts_min):
+def _not_stuck(L, dom_min, cuts_min, max_year=MAX_YEAR):
     """למה המודעה לא "תקועה" לפי הסף — או None. DOM מצטבר על כל הרישומים; cuts = רישומים חוזרים בזול יותר."""
+    if max_year and L.get("year") and L["year"] >= max_year:
+        return f"נבנה ב-{max_year:.0f}+ (מלאי קבלנים, לא מועמד שיפוץ)"
     if dom_min and (L.get("dom_total") or L["dom"] or 0) < dom_min:
         return f"DOM מצטבר < {dom_min:.0f}"
     if cuts_min and (L["cuts"] or 0) < cuts_min:
@@ -325,7 +329,7 @@ def _not_stuck(L, dom_min, cuts_min):
     return None
 
 
-def underwrite(listings, dom_min=0, comps_for=None, min_arv=200_000, max_offer=350_000, cuts_min=0):
+def underwrite(listings, dom_min=0, comps_for=None, min_arv=200_000, max_offer=350_000, cuts_min=0, max_year=MAX_YEAR):
     zips = set(sdf.TARGET)
     sales, loc = arv.market()
     today = max(s["date"] for s in loc)
@@ -337,7 +341,7 @@ def underwrite(listings, dom_min=0, comps_for=None, min_arv=200_000, max_offer=3
             ppsf[L["zip"]].append(L["price"] / L["sqft"])
     ppsf = {z: st.median(v) for z, v in ppsf.items()}
     todo = [L for L in listings if L["zip"] in zips and L["price"] and L["lat"]
-            and not _not_stuck(L, dom_min, cuts_min)
+            and not _not_stuck(L, dom_min, cuts_min, max_year)
             and f"{L['address']}|{L['zip']}".upper() not in cache]
     if todo:                                   # שווי שומה: 4 במקביל, ~0.5 שנייה למודעה
         print(f"  שולף שווי שומה ל-{len(todo)} מודעות חדשות (~{len(todo) * 0.45 / 60:.0f} דקות, פעם אחת)...",
@@ -353,7 +357,7 @@ def underwrite(listings, dom_min=0, comps_for=None, min_arv=200_000, max_offer=3
         if L["zip"] not in zips:
             skipped["מחוץ ל-12 זיפי היעד"] += 1
             continue
-        why = _not_stuck(L, dom_min, cuts_min)
+        why = _not_stuck(L, dom_min, cuts_min, max_year)
         if why:
             skipped[why] += 1
             continue
@@ -539,6 +543,12 @@ def selftest():
     assert _not_stuck({"dom": 14, "dom_total": 60, "cuts": 2}, 90, 2).startswith("DOM")
     assert _not_stuck({"dom": 200, "dom_total": 200, "cuts": 1}, 90, 2).startswith("פחות")
     assert _not_stuck({"dom": 200, "cuts": None}, 90, 0) is None      # Redfin בלי dom_total
+    # סינון בנייה חדשה (14.9.2026): 2025 נופל, 1999 עובר, שנה חסרה עוברת, --max-year 0 מבטל
+    assert _not_stuck({"dom": 200, "dom_total": 200, "cuts": 2, "year": 2025}, 90, 2).startswith("נבנה")
+    assert _not_stuck({"dom": 200, "dom_total": 200, "cuts": 2, "year": 2000}, 90, 2).startswith("נבנה")
+    assert _not_stuck({"dom": 200, "dom_total": 200, "cuts": 2, "year": 1999}, 90, 2) is None
+    assert _not_stuck({"dom": 200, "dom_total": 200, "cuts": 2, "year": None}, 90, 2) is None
+    assert _not_stuck({"dom": 200, "dom_total": 200, "cuts": 2, "year": 2025}, 90, 2, max_year=0) is None
     # מונה המכסה: נצבר לחודש, ו-_guard עוצר לפני הבקשה שתחרוג מ-50 — אלא אם הועלה --limit
     global QUOTA_FILE
     orig, QUOTA_FILE = QUOTA_FILE, os.path.join(tempfile.mkdtemp(), "q.json")
@@ -568,6 +578,7 @@ if __name__ == "__main__":
         return float(args[args.index(flag) + 1]) if flag in args else default
     dom_min, cuts_min = opt("--dom", 0), opt("--cuts", 0)
     min_arv, max_offer = opt("--min-arv", 200_000), opt("--max-offer", 350_000)
+    max_year = opt("--max-year", MAX_YEAR)      # --max-year 0 מבטל את הסינון
     comps_for = args[args.index("--comps") + 1] if "--comps" in args else None
     if "--rentcast" in args:
         listings, skipped = read_rentcast(fresh="--fresh" in args, limit=int(opt("--limit", RENTCAST_FREE)))
@@ -580,5 +591,5 @@ if __name__ == "__main__":
             sys.exit("אין קבצי redfin_*.csv — להוריד מ-Redfin (\"Download All\" בתחתית החיפוש) ל-Downloads ולהריץ שוב.\n"
                      "שימוש: python3 listings.py [קבצים.csv] [--dom 30] [--comps \"כתובת\"] [--all]  |  --rentcast")
         listings, skipped = read_redfin(paths)
-    rows, more, today = underwrite(listings, dom_min, comps_for, min_arv, max_offer, cuts_min)
+    rows, more, today = underwrite(listings, dom_min, comps_for, min_arv, max_offer, cuts_min, max_year)
     print_table(rows, skipped + more, today, "--all" in args)
